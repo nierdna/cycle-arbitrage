@@ -17,6 +17,8 @@ const TOKENS = {
   USDT: '0x55d398326f99059fF775485246999027B3197955',
   WBNB: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
   ASTER: '0x000Ae314E2A2172a039B26378814C252734f556A',
+  ETH: "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
+  KOGE: "0xe6DF05CE8C8301223373CF5B969AFCb1498c5528"
 };
 
 async function main() {
@@ -39,30 +41,49 @@ async function main() {
           minAmountIn: BigInt(1e10), // 0.0001 USDT
           maxAmountIn: BigInt(1e19), // 10 USDT
         },
-        // {
-        //   tokens: ['USDT', 'WBNB', 'USDT'],
-        //   addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
-        //   fees: [100, 500], // 0.01%, 0.05%
-        //   // This cycle will use global defaults if not specified
-        // },
+        {
+          tokens: ['USDT', 'WBNB', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
+          fees: [100, 500], // 0.01%, 0.05%
+          // This cycle will use global defaults if not specified
+        },
       ],
       name: 'USDT-WBNB cluster',
     },
-    // {
-    //   cycles: [
-    // {
-    //   tokens: ['USDT', 'ASTER', 'USDT'],
-    //   addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
-    //   fees: [500, 2500], // 0.05%, 0.25%
-    // },
-    // {
-    //   tokens: ['USDT', 'ASTER', 'USDT'],
-    //   addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
-    //   fees: [2500, 500], // 0.25%, 0.05%
-    // },
-    //   ],
-    //   name: 'USDT-ASTER cluster',
-    // },
+    {
+      cycles: [
+        {
+          tokens: ['USDT', 'ASTER', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
+          fees: [500, 2500], // 0.05%, 0.25%
+        },
+        {
+          tokens: ['USDT', 'ASTER', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
+          fees: [2500, 500], // 0.25%, 0.05%
+        },
+      ],
+      name: 'USDT-ASTER cluster',
+    },
+    {
+      cycles: [
+        {
+          tokens: ['USDT', 'KOGE', 'ETH', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.KOGE, TOKENS.ETH, TOKENS.USDT],
+          fees: [100, 10000, 500], // 0.01%, 1%, 0.05%,
+          minAmountIn: BigInt(1e16),
+          maxAmountIn: BigInt(1e20),
+        },
+        {
+          tokens: ['USDT', 'ETH', 'KOGE', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.ETH, TOKENS.KOGE, TOKENS.USDT],
+          fees: [500, 10000, 100], // 0.01%, 1%, 0.05%,
+          minAmountIn: BigInt(1e16),
+          maxAmountIn: BigInt(1e20),
+        },
+      ],
+      name: 'KOGE-ETH-USDT-KOGE cluster',
+    },
   ];
 
   // Create arbitrage instance

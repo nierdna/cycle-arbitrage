@@ -5,6 +5,8 @@
 
 import { ethers } from 'ethers';
 import { QuoterV3, StateFetcher } from 'uniswap-v3-quoter';
+import winston from 'winston';
+import { createLogger } from './logger';
 
 // BSC Contract Addresses
 const PANCAKE_V3_FACTORY = '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865';
@@ -73,6 +75,7 @@ export interface ArbitrageOptions {
   maxAmountIn?: bigint; // Maximum amount to search (default: 100 tokens)
   optimizationInterval?: number; // Re-optimize every N scans (default: 100)
   optimizationPrecision?: bigint; // Precision for ternary search (default: 0.001 tokens)
+  logDir?: string; // Log directory path (default: 'log')
 }
 
 /**
@@ -85,15 +88,17 @@ export class CycleArbitrage {
   private factory: ethers.Contract;
   private wallet?: ethers.Wallet;
   private router?: ethers.Contract;
+  private logger: winston.Logger;
 
   private cycles: Map<string, CycleWithState> = new Map();
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision'>> & {
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
     minAmountIn: bigint;
     maxAmountIn: bigint;
     optimizationInterval: number;
     optimizationPrecision: bigint;
+    logDir: string;
   };
 
   constructor(
@@ -112,7 +117,11 @@ export class CycleArbitrage {
       maxAmountIn: options.maxAmountIn ?? BigInt(1e20), // 100 tokens
       optimizationInterval: options.optimizationInterval ?? 100,
       optimizationPrecision: options.optimizationPrecision ?? BigInt(1e15), // 0.001 tokens
+      logDir: options.logDir ?? 'log',
     };
+
+    // Initialize logger
+    this.logger = createLogger(this.options.logDir);
 
     // Initialize cycles from clusters
     // Use global defaults from options (already set above)
@@ -168,13 +177,13 @@ export class CycleArbitrage {
    * Initialize: Fetch pool addresses and subscribe to WebSocket
    */
   async initialize(): Promise<void> {
-    console.log('=== Cycle Arbitrage ===\n');
-    console.log(`Total cycles: ${this.cycles.size}\n`);
+    this.logger.info('=== Cycle Arbitrage ===');
+    this.logger.info(`Total cycles: ${this.cycles.size}`);
 
     // Fetch pool addresses for all cycles
-    console.log('Fetching pool addresses...');
+    this.logger.info('Fetching pool addresses...');
     for (const [cycleId, cycle] of this.cycles.entries()) {
-      console.log(`\nCycle: ${cycle.tokens.join(' -> ')} (${cycleId})`);
+      this.logger.info(`Cycle: ${cycle.tokens.join(' -> ')} (${cycleId})`);
       cycle.poolAddresses = [];
 
       for (let i = 0; i < cycle.tokens.length - 1; i++) {
@@ -184,12 +193,12 @@ export class CycleArbitrage {
           cycle.fees[i]
         );
         cycle.poolAddresses.push(poolAddress);
-        console.log(`  Pool ${i + 1}: ${poolAddress}`);
+        this.logger.info(`  Pool ${i + 1}: ${poolAddress}`);
       }
     }
 
     // Fetch initial pool states (deduplicate pool addresses)
-    console.log('\nFetching initial pool states...');
+    this.logger.info('Fetching initial pool states...');
     const allPoolAddresses = new Set<string>();
     for (const cycle of this.cycles.values()) {
       for (const poolAddress of cycle.poolAddresses) {
@@ -204,9 +213,9 @@ export class CycleArbitrage {
     // Start WebSocket if configured
     if (this.options.wssUrl) {
       await this.stateFetcher.startWebSocket();
-      console.log('✓ WebSocket connected\n');
+      this.logger.info('✓ WebSocket connected');
     } else {
-      console.log('⚠ WebSocket not configured (using polling)\n');
+      this.logger.warn('⚠ WebSocket not configured (using polling)');
     }
   }
 
@@ -313,7 +322,7 @@ export class CycleArbitrage {
 
     // Initial optimization if enabled
     if (this.options.optimizeAmountIn) {
-      console.log(
+      this.logger.info(
         `[${cycleId}] Finding optimal amountIn (range: ${ethers.formatEther(minAmountIn)} - ${ethers.formatEther(maxAmountIn)})...`
       );
       try {
@@ -326,13 +335,13 @@ export class CycleArbitrage {
         optimalAmountIn = optimal.amountIn;
         optimalArbBps = optimal.arbitrageBps;
         currentAmountIn = optimalAmountIn;
-        console.log(
+        this.logger.info(
           `[${cycleId}] Optimal: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
-          `arb: ${optimalArbBps.toFixed(2)} bps\n`
+          `arb: ${optimalArbBps.toFixed(2)} bps`
         );
       } catch (error) {
-        console.error(`[${cycleId}] Optimization failed:`, error);
-        console.log(`[${cycleId}] Using default amountIn: ${ethers.formatEther(this.options.amountIn)}\n`);
+        this.logger.error(`[${cycleId}] Optimization failed:`, error);
+        this.logger.info(`[${cycleId}] Using default amountIn: ${ethers.formatEther(this.options.amountIn)}`);
       }
     }
 
@@ -355,13 +364,13 @@ export class CycleArbitrage {
               optimalAmountIn = optimal.amountIn;
               optimalArbBps = optimal.arbitrageBps;
               currentAmountIn = optimalAmountIn;
-              console.log(
+              this.logger.info(
                 `[${cycleId}] Re-optimized: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
                 `arb: ${optimalArbBps.toFixed(2)} bps`
               );
             }
           } catch (error) {
-            console.error(`[${cycleId}] Re-optimization failed:`, error);
+            this.logger.error(`[${cycleId}] Re-optimization failed:`, error);
           }
         }
 
@@ -380,18 +389,17 @@ export class CycleArbitrage {
 
         if (arbitrageBps > this.options.minArbitrageBps) {
           const timestamp = new Date().toISOString();
-          console.log(`[${timestamp}] 🎯 Arbitrage detected!`);
-          console.log(`  Cycle: ${cycle.tokens.join(' -> ')}`);
-          console.log(`  Arbitrage: ${arbitrageBps.toFixed(2)} bps`);
-          console.log(`  Amount in:  ${ethers.formatEther(currentAmountIn)}`);
-          console.log(`  Amount out: ${ethers.formatEther(amountOut)}`);
-          console.log(`  Profit:     ${ethers.formatEther(amountOut - currentAmountIn)}`);
-          if (this.options.optimizeAmountIn) {
-            console.log(
-              `  Optimal amount: ${ethers.formatEther(optimalAmountIn)} (arb: ${optimalArbBps.toFixed(2)} bps)`
-            );
-          }
-          console.log();
+          this.logger.info('🎯 Arbitrage detected!', {
+            cycle: cycle.tokens.join(' -> '),
+            cycleId,
+            arbitrageBps: arbitrageBps.toFixed(2),
+            amountIn: ethers.formatEther(currentAmountIn),
+            amountOut: ethers.formatEther(amountOut),
+            profit: ethers.formatEther(amountOut - currentAmountIn),
+            optimalAmount: this.options.optimizeAmountIn ? ethers.formatEther(optimalAmountIn) : undefined,
+            optimalArbBps: this.options.optimizeAmountIn ? optimalArbBps.toFixed(2) : undefined,
+            timestamp,
+          });
 
           // Execute if wallet/router is set
           if (this.wallet && this.router) {
@@ -409,16 +417,16 @@ export class CycleArbitrage {
             await this.executeCycle(cycleId, executeAmount, executeAmountOut);
           }
         } else if (scanCount % 1000 === 0) {
-          console.log(
-            `[${new Date().toISOString()}] [${cycleId}] Scanning... ` +
+          this.logger.info(
+            `[${cycleId}] Scanning... ` +
             `(arb: ${arbitrageBps.toFixed(2)} bps, amount: ${ethers.formatEther(currentAmountIn)}, scans: ${scanCount})`
           );
         }
 
         await this.sleep(this.options.scanIntervalMs);
       } catch (error) {
-        console.error(
-          `[${new Date().toISOString()}] [${cycleId}] Scan error:`,
+        this.logger.error(
+          `[${cycleId}] Scan error:`,
           error
         );
         await this.sleep(5000);
@@ -430,11 +438,11 @@ export class CycleArbitrage {
    * Scan all cycles in parallel
    */
   async scan(): Promise<void> {
-    console.log('Starting arbitrage scan...');
-    console.log(`  Min arbitrage: ${this.options.minArbitrageBps} bps`);
-    console.log(`  Scan interval: ${this.options.scanIntervalMs}ms`);
-    console.log(`  Test amount: ${ethers.formatEther(this.options.amountIn)} tokens`);
-    console.log(`  Cycles: ${this.cycles.size}\n`);
+    this.logger.info('Starting arbitrage scan...');
+    this.logger.info(`  Min arbitrage: ${this.options.minArbitrageBps} bps`);
+    this.logger.info(`  Scan interval: ${this.options.scanIntervalMs}ms`);
+    this.logger.info(`  Test amount: ${ethers.formatEther(this.options.amountIn)} tokens`);
+    this.logger.info(`  Cycles: ${this.cycles.size}`);
 
     // Start scanning each cycle in parallel
     const scanTasks = Array.from(this.cycles.keys()).map((cycleId) =>
@@ -465,7 +473,7 @@ export class CycleArbitrage {
       // Encode swap path
       const path = this.encodeSwapPath(cycle.addresses, cycle.fees);
 
-      console.log(`  [${cycleId}] Executing swap...`);
+      this.logger.info(`[${cycleId}] Executing swap...`);
 
       // Execute swap
       const tx = await this.router.swapExactInput({
@@ -476,14 +484,14 @@ export class CycleArbitrage {
         amountOutMinimum: minAmountOut,
       });
 
-      console.log(`  [${cycleId}] TX hash: ${tx.hash}`);
+      this.logger.info(`[${cycleId}] TX hash: ${tx.hash}`);
       const receipt = await tx.wait();
-      console.log(`  [${cycleId}] ✓ Swap confirmed: ${receipt.hash}\n`);
+      this.logger.info(`[${cycleId}] ✓ Swap confirmed: ${receipt.hash}`);
 
       // Analyze result
       await this.analyze(receipt, amountIn);
     } catch (error: any) {
-      console.error(`  [${cycleId}] ✗ Execution failed:`, error.message || error);
+      this.logger.error(`[${cycleId}] ✗ Execution failed:`, error.message || error);
     }
   }
 
@@ -498,12 +506,13 @@ export class CycleArbitrage {
         ((actualOut - amountIn) * BigInt(1e4)) / amountIn
       );
 
-      console.log('  Trade Analysis:');
-      console.log(`    Profit: ${profitBps.toFixed(2)} bps`);
-      console.log(`    Actual out: ${ethers.formatEther(actualOut)}`);
-      console.log(`    Actual profit: ${ethers.formatEther(actualOut - amountIn)}\n`);
+      this.logger.info('Trade Analysis:', {
+        profitBps: profitBps.toFixed(2),
+        actualOut: ethers.formatEther(actualOut),
+        actualProfit: ethers.formatEther(actualOut - amountIn),
+      });
     } catch (error) {
-      console.error('  ⚠ Could not parse receipt:', error);
+      this.logger.error('⚠ Could not parse receipt:', error);
     }
   }
 

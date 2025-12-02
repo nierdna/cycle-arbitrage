@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "ethers": "^6.9.0",
-    "uniswap-v3-quoter": "^0.3.0"
+    "uniswap-v3-quoter": "^0.3.0",
+    "winston": "^3.18.3"
   },
   "devDependencies": {
     "@types/node": "^20.10.6",
