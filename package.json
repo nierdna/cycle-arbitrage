@@ -1,0 +1,25 @@
+{
+  "name": "cycle-arbitrage-mvp",
+  "version": "0.1.0",
+  "description": "MVP Cycle Arbitrage bot for PancakeSwap V3 on BSC",
+  "type": "module",
+  "main": "dist/cycleArbitrage.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx examples/main.ts",
+    "dev": "tsx watch examples/main.ts"
+  },
+  "dependencies": {
+    "ethers": "^6.9.0",
+    "uniswap-v3-quoter": "^0.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.6",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
