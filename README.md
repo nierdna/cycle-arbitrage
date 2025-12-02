@@ -1,10 +1,11 @@
-# Cycle Arbitrage MVP
+# Cycle Arbitrage
 
-MVP implementation of cycle arbitrage bot for PancakeSwap V3 on BSC.
+Cycle arbitrage bot for PancakeSwap V3 on BSC with support for multiple cycle clusters.
 
 ## Features
 
-- ✅ Single cycle support (minimal implementation)
+- ✅ Cycle cluster support (multiple cycles per cluster)
+- ✅ Parallel scanning (each cycle scans independently)
 - ✅ Real-time quotes using `uniswap-v3-quoter`
 - ✅ WebSocket support for instant pool state updates
 - ✅ Auto-execution mode (optional)
@@ -47,24 +48,34 @@ export PRIVATE_KEY=0x...
 npm start
 ```
 
-## Example Cycle
+## Example Cycle Clusters
 
 The default example uses:
-- **Cycle**: USDT -> WBNB -> USDT
-- **Fees**: [500, 100] bps (0.05%, 0.01%)
-- **Min Arbitrage**: 2 bps
-- **Scan Interval**: 10ms
 
-## Customize Cycle
+**Cluster 1: USDT-WBNB**
+- Cycle 1: USDT -> WBNB -> USDT (fees: [500, 100])
+- Cycle 2: USDT -> WBNB -> USDT (fees: [100, 500])
+
+**Cluster 2: USDT-ASTER**
+- Cycle 1: USDT -> ASTER -> USDT (fees: [2500, 500])
+
+## Customize Cycles
 
 Edit `examples/main.ts`:
 
 ```typescript
-const cycle = {
-  tokens: ['USDT', 'ASTER', 'USDT'],
-  addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
-  fees: [2500, 500], // 0.25%, 0.05%
-};
+const clusters = [
+  {
+    cycles: [
+      {
+        tokens: ['USDT', 'ASTER', 'USDT'],
+        addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
+        fees: [2500, 500],
+      },
+    ],
+    name: 'USDT-ASTER cluster',
+  },
+];
 ```
 
 ## Architecture
@@ -72,10 +83,12 @@ const cycle = {
 - **Single file**: All logic in `src/cycleArbitrage.ts`
 - **Minimal dependencies**: Only `ethers` and `uniswap-v3-quoter`
 - **No fee calculation**: Library handles fees internally
+- **Parallel scanning**: Each cycle scans independently in parallel
 
 ## Notes
 
-- This is an MVP - minimal implementation for one cycle only
+- Supports multiple cycle clusters (like Python version)
+- Each cycle in a cluster scans in parallel
 - Fee is handled by `QuoterV3` - no manual fee calculation needed
 - WebSocket is optional but recommended for real-time updates
 - Execution mode requires private key (use with caution!)

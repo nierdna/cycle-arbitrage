@@ -1,6 +1,6 @@
 /**
- * MVP Cycle Arbitrage - Single cycle only
- * Minimal implementation for one cycle arbitrage on PancakeSwap V3
+ * Cycle Arbitrage - Support Cycle Clusters
+ * Minimal implementation for cycle arbitrage on PancakeSwap V3
  */
 
 import { ethers } from 'ethers';
@@ -47,6 +47,16 @@ export interface CycleConfig {
   fees: number[]; // [500, 100] in bps
 }
 
+export interface CycleCluster {
+  cycles: CycleConfig[];
+  name?: string;
+}
+
+interface CycleWithState extends CycleConfig {
+  poolAddresses: string[];
+  cycleId: string;
+}
+
 export interface ArbitrageOptions {
   minArbitrageBps?: number;
   scanIntervalMs?: number;
@@ -55,9 +65,9 @@ export interface ArbitrageOptions {
 }
 
 /**
- * MVP Cycle Arbitrage - Single cycle only
+ * Cycle Arbitrage - Support Cycle Clusters
  */
-export class CycleArbitrageMVP {
+export class CycleArbitrage {
   private provider: ethers.Provider;
   private stateFetcher: StateFetcher;
   private quoter: QuoterV3;
@@ -65,25 +75,33 @@ export class CycleArbitrageMVP {
   private wallet?: ethers.Wallet;
   private router?: ethers.Contract;
 
-  private cycle: CycleConfig & { poolAddresses: string[] };
+  private cycles: Map<string, CycleWithState> = new Map();
   private options: Required<Omit<ArbitrageOptions, 'wssUrl'>> & { wssUrl?: string };
 
   constructor(
     provider: ethers.Provider,
-    cycle: CycleConfig,
+    clusters: CycleCluster[],
     options: ArbitrageOptions = {}
   ) {
     this.provider = provider;
-    this.cycle = {
-      ...cycle,
-      poolAddresses: [],
-    };
     this.options = {
       minArbitrageBps: options.minArbitrageBps ?? 2,
       scanIntervalMs: options.scanIntervalMs ?? 10,
       amountIn: options.amountIn ?? BigInt(1e18), // 1 token (18 decimals)
       wssUrl: options.wssUrl,
     };
+
+    // Initialize cycles from clusters
+    for (const cluster of clusters) {
+      for (const cycle of cluster.cycles) {
+        const cycleId = this.getCycleId(cycle);
+        this.cycles.set(cycleId, {
+          ...cycle,
+          poolAddresses: [],
+          cycleId,
+        });
+      }
+    }
 
     // Initialize StateFetcher with WebSocket
     this.stateFetcher = new StateFetcher(
@@ -98,7 +116,14 @@ export class CycleArbitrageMVP {
     );
 
     this.quoter = new QuoterV3(this.stateFetcher);
-    this.factory = new ethers.Contract(PANCAKE_V3_FACTORY, FACTORY_ABI, provider);
+    this.factory = new ethers.Contract(PANCAKE_V3_FACTORY, FACTORY_ABI, this.provider);
+  }
+
+  /**
+   * Generate unique ID for cycle
+   */
+  private getCycleId(cycle: CycleConfig): string {
+    return `${cycle.tokens.join('-')}-${cycle.fees.join('-')}`;
   }
 
   /**
@@ -113,26 +138,36 @@ export class CycleArbitrageMVP {
    * Initialize: Fetch pool addresses and subscribe to WebSocket
    */
   async initialize(): Promise<void> {
-    console.log('=== Cycle Arbitrage MVP ===\n');
-    console.log(`Cycle: ${this.cycle.tokens.join(' -> ')}`);
-    console.log(`Fees: ${this.cycle.fees.join(', ')} bps\n`);
+    console.log('=== Cycle Arbitrage ===\n');
+    console.log(`Total cycles: ${this.cycles.size}\n`);
 
-    // Fetch pool addresses for each hop
+    // Fetch pool addresses for all cycles
     console.log('Fetching pool addresses...');
-    this.cycle.poolAddresses = [];
-    for (let i = 0; i < this.cycle.tokens.length - 1; i++) {
-      const poolAddress = await this.getPoolAddress(
-        this.cycle.addresses[i],
-        this.cycle.addresses[i + 1],
-        this.cycle.fees[i]
-      );
-      this.cycle.poolAddresses.push(poolAddress);
-      console.log(`  Pool ${i + 1} (${this.cycle.tokens[i]} -> ${this.cycle.tokens[i + 1]}): ${poolAddress}`);
+    for (const [cycleId, cycle] of this.cycles.entries()) {
+      console.log(`\nCycle: ${cycle.tokens.join(' -> ')} (${cycleId})`);
+      cycle.poolAddresses = [];
+
+      for (let i = 0; i < cycle.tokens.length - 1; i++) {
+        const poolAddress = await this.getPoolAddress(
+          cycle.addresses[i],
+          cycle.addresses[i + 1],
+          cycle.fees[i]
+        );
+        cycle.poolAddresses.push(poolAddress);
+        console.log(`  Pool ${i + 1}: ${poolAddress}`);
+      }
     }
 
-    // Fetch initial pool states
+    // Fetch initial pool states (deduplicate pool addresses)
     console.log('\nFetching initial pool states...');
-    for (const poolAddress of this.cycle.poolAddresses) {
+    const allPoolAddresses = new Set<string>();
+    for (const cycle of this.cycles.values()) {
+      for (const poolAddress of cycle.poolAddresses) {
+        allPoolAddresses.add(poolAddress);
+      }
+    }
+
+    for (const poolAddress of allPoolAddresses) {
       await this.stateFetcher.fetchPoolState(poolAddress);
     }
 
@@ -146,20 +181,27 @@ export class CycleArbitrageMVP {
   }
 
   /**
-   * Estimate amount out for the cycle (multi-hop)
+   * Estimate amount out for a specific cycle (multi-hop)
    * Fee is already handled by QuoterV3 internally
    */
-  async estimateAmountOut(amountIn: bigint): Promise<bigint> {
+  async estimateAmountOutForCycle(cycleId: string, amountIn: bigint): Promise<bigint> {
+    const cycle = this.cycles.get(cycleId);
+    if (!cycle) {
+      throw new Error(`Cycle not found: ${cycleId}`);
+    }
+
     let amountOut = amountIn;
 
     // Iterate through each hop
-    for (let i = 0; i < this.cycle.tokens.length - 1; i++) {
-      const poolAddress = this.cycle.poolAddresses[i];
-      const tokenIn = this.cycle.addresses[i];
-      const tokenOut = this.cycle.addresses[i + 1];
+    for (let i = 0; i < cycle.tokens.length - 1; i++) {
+      const poolAddress = cycle.poolAddresses[i];
+      const tokenIn = cycle.addresses[i];
 
-      // Get pool state to determine swap direction
-      const poolState = await this.stateFetcher.fetchPoolState(poolAddress);
+      // Get pool state from cache (sync - already fetched in initialize)
+      const poolState = this.stateFetcher.getPoolState(poolAddress);
+      if (!poolState) {
+        throw new Error(`Pool state not found in cache: ${poolAddress}. Make sure initialize() was called.`);
+      }
       const zeroForOne = poolState.token0.toLowerCase() === tokenIn.toLowerCase();
 
       // Quote single hop (fee handled internally by QuoterV3)
@@ -174,31 +216,33 @@ export class CycleArbitrageMVP {
   }
 
   /**
-   * Scan for arbitrage opportunities continuously
+   * Scan a single cycle continuously
    */
-  async scan(): Promise<void> {
-    console.log('Starting arbitrage scan...');
-    console.log(`  Min arbitrage: ${this.options.minArbitrageBps} bps`);
-    console.log(`  Scan interval: ${this.options.scanIntervalMs}ms`);
-    console.log(`  Test amount: ${ethers.formatEther(this.options.amountIn)} tokens\n`);
+  private async scanCycle(cycleId: string): Promise<void> {
+    const cycle = this.cycles.get(cycleId);
+    if (!cycle) return;
 
     let scanCount = 0;
 
     while (true) {
       try {
-        const amountOut = await this.estimateAmountOut(this.options.amountIn);
+        const amountOut = await this.estimateAmountOutForCycle(
+          cycleId,
+          this.options.amountIn
+        );
 
         // Calculate arbitrage in bps
         const arbitrageBps = Number(
-          ((amountOut - this.options.amountIn) * BigInt(1e4)) / this.options.amountIn
+          ((amountOut - this.options.amountIn) * BigInt(1e4)) /
+          this.options.amountIn
         );
-        console.log("🚀 ~ CycleArbitrageMVP ~ scan ~ arbitrageBps:", arbitrageBps)
 
         scanCount++;
 
         if (arbitrageBps > this.options.minArbitrageBps) {
           const timestamp = new Date().toISOString();
           console.log(`[${timestamp}] 🎯 Arbitrage detected!`);
+          console.log(`  Cycle: ${cycle.tokens.join(' -> ')}`);
           console.log(`  Arbitrage: ${arbitrageBps.toFixed(2)} bps`);
           console.log(`  Amount in:  ${ethers.formatEther(this.options.amountIn)}`);
           console.log(`  Amount out: ${ethers.formatEther(amountOut)}`);
@@ -206,29 +250,55 @@ export class CycleArbitrageMVP {
 
           // Execute if wallet/router is set
           if (this.wallet && this.router) {
-            await this.execute(this.options.amountIn, amountOut);
+            await this.executeCycle(cycleId, this.options.amountIn, amountOut);
           }
         } else if (scanCount % 1000 === 0) {
-          // Log every 1000 scans to show it's working
           console.log(
-            `[${new Date().toISOString()}] Scanning... (arb: ${arbitrageBps.toFixed(2)} bps, scans: ${scanCount})`
+            `[${new Date().toISOString()}] [${cycleId}] Scanning... (arb: ${arbitrageBps.toFixed(2)} bps, scans: ${scanCount})`
           );
         }
 
         await this.sleep(this.options.scanIntervalMs);
       } catch (error) {
-        console.error(`[${new Date().toISOString()}] Scan error:`, error);
+        console.error(
+          `[${new Date().toISOString()}] [${cycleId}] Scan error:`,
+          error
+        );
         await this.sleep(5000);
       }
     }
   }
 
   /**
-   * Execute arbitrage trade
+   * Scan all cycles in parallel
    */
-  private async execute(amountIn: bigint, estimatedOut: bigint): Promise<void> {
-    if (!this.wallet || !this.router) {
-      throw new Error('Wallet and router not set. Call setExecution() first.');
+  async scan(): Promise<void> {
+    console.log('Starting arbitrage scan...');
+    console.log(`  Min arbitrage: ${this.options.minArbitrageBps} bps`);
+    console.log(`  Scan interval: ${this.options.scanIntervalMs}ms`);
+    console.log(`  Test amount: ${ethers.formatEther(this.options.amountIn)} tokens`);
+    console.log(`  Cycles: ${this.cycles.size}\n`);
+
+    // Start scanning each cycle in parallel
+    const scanTasks = Array.from(this.cycles.keys()).map((cycleId) =>
+      this.scanCycle(cycleId)
+    );
+
+    // Wait for all tasks (they run forever, so this never resolves)
+    await Promise.all(scanTasks);
+  }
+
+  /**
+   * Execute arbitrage trade for a specific cycle
+   */
+  private async executeCycle(
+    cycleId: string,
+    amountIn: bigint,
+    estimatedOut: bigint
+  ): Promise<void> {
+    const cycle = this.cycles.get(cycleId);
+    if (!cycle || !this.wallet || !this.router) {
+      return;
     }
 
     try {
@@ -236,9 +306,9 @@ export class CycleArbitrageMVP {
       const minAmountOut = (estimatedOut * BigInt(9990)) / BigInt(10000);
 
       // Encode swap path
-      const path = this.encodeSwapPath(this.cycle.addresses, this.cycle.fees);
+      const path = this.encodeSwapPath(cycle.addresses, cycle.fees);
 
-      console.log('  Executing swap...');
+      console.log(`  [${cycleId}] Executing swap...`);
 
       // Execute swap
       const tx = await this.router.swapExactInput({
@@ -249,16 +319,14 @@ export class CycleArbitrageMVP {
         amountOutMinimum: minAmountOut,
       });
 
-      console.log(`  TX hash: ${tx.hash}`);
-      console.log('  Waiting for confirmation...');
-
+      console.log(`  [${cycleId}] TX hash: ${tx.hash}`);
       const receipt = await tx.wait();
-      console.log(`  ✓ Swap confirmed: ${receipt.hash}\n`);
+      console.log(`  [${cycleId}] ✓ Swap confirmed: ${receipt.hash}\n`);
 
       // Analyze result
       await this.analyze(receipt, amountIn);
     } catch (error: any) {
-      console.error('  ✗ Execution failed:', error.message || error);
+      console.error(`  [${cycleId}] ✗ Execution failed:`, error.message || error);
     }
   }
 

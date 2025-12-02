@@ -9,7 +9,7 @@
  */
 
 import { ethers } from 'ethers';
-import { CycleArbitrageMVP } from '../src/cycleArbitrage';
+import { CycleArbitrage } from '../src/cycleArbitrage';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
 
 // Token addresses on BSC (from execution/web3pro/const.py)
@@ -27,16 +27,42 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   console.log(`RPC: ${rpcUrl}\n`);
 
-  // Define single cycle
-  // Example: USDT -> WBNB -> USDT with fees [500, 100] (0.05%, 0.01%)
-  const cycle = {
-    tokens: ['USDT', 'WBNB', 'USDT'],
-    addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
-    fees: [500, 100], // 0.05%, 0.01%
-  };
+  // Define cycle clusters
+  const clusters = [
+    // {
+    //   cycles: [
+    //     {
+    //       tokens: ['USDT', 'WBNB', 'USDT'],
+    //       addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
+    //       fees: [500, 100], // 0.05%, 0.01%
+    //     },
+    //     {
+    //       tokens: ['USDT', 'WBNB', 'USDT'],
+    //       addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
+    //       fees: [100, 500], // 0.01%, 0.05%
+    //     },
+    //   ],
+    //   name: 'USDT-WBNB cluster',
+    // },
+    {
+      cycles: [
+        {
+          tokens: ['USDT', 'ASTER', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
+          fees: [500, 2500], // 0.05%, 0.25%
+        },
+        {
+          tokens: ['USDT', 'ASTER', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
+          fees: [2500, 500], // 0.25%, 0.05%
+        },
+      ],
+      name: 'USDT-ASTER cluster',
+    },
+  ];
 
   // Create arbitrage instance
-  const arbitrage = new CycleArbitrageMVP(provider, cycle, {
+  const arbitrage = new CycleArbitrage(provider, clusters, {
     minArbitrageBps: 2, // Minimum 2 bps profit
     scanIntervalMs: 1, // Scan every 1ms
     wssUrl: process.env.BSC_WSS_URL, // Optional: for real-time updates
