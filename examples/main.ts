@@ -35,11 +35,15 @@ async function main() {
           tokens: ['USDT', 'WBNB', 'USDT'],
           addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
           fees: [500, 100], // 0.05%, 0.01%
+          // Per-cycle optimization range (overrides global defaults)
+          minAmountIn: BigInt(1e10), // 0.0001 USDT
+          maxAmountIn: BigInt(1e19), // 10 USDT
         },
         // {
         //   tokens: ['USDT', 'WBNB', 'USDT'],
         //   addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
         //   fees: [100, 500], // 0.01%, 0.05%
+        //   // This cycle will use global defaults if not specified
         // },
       ],
       name: 'USDT-WBNB cluster',
@@ -69,6 +73,7 @@ async function main() {
     amountIn: BigInt(1e18), // 1 USDT (18 decimals) - fallback if optimization disabled
     // Enable amountIn optimization using Ternary Search
     optimizeAmountIn: true,
+    // Global defaults (used for cycles that don't specify minAmountIn/maxAmountIn)
     minAmountIn: BigInt(1e10), // 0.0001 USDT - minimum search range
     maxAmountIn: BigInt(1e21), // 10 USDT - maximum search range
     optimizationInterval: 100, // Re-optimize every 100 scans

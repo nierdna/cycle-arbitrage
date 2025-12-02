@@ -45,6 +45,9 @@ export interface CycleConfig {
   tokens: string[]; // ["USDT", "WBNB", "USDT"]
   addresses: string[]; // BSC addresses
   fees: number[]; // [500, 100] in bps
+  // Optional: per-cycle optimization settings (override global defaults)
+  minAmountIn?: bigint; // Minimum amount to search for this cycle
+  maxAmountIn?: bigint; // Maximum amount to search for this cycle
 }
 
 export interface CycleCluster {
@@ -55,6 +58,9 @@ export interface CycleCluster {
 interface CycleWithState extends CycleConfig {
   poolAddresses: string[];
   cycleId: string;
+  // These will be set from cycle config or global defaults
+  minAmountIn: bigint;
+  maxAmountIn: bigint;
 }
 
 export interface ArbitrageOptions {
@@ -109,6 +115,10 @@ export class CycleArbitrage {
     };
 
     // Initialize cycles from clusters
+    // Use global defaults from options (already set above)
+    const globalMinAmountIn = this.options.minAmountIn;
+    const globalMaxAmountIn = this.options.maxAmountIn;
+
     for (const cluster of clusters) {
       for (const cycle of cluster.cycles) {
         const cycleId = this.getCycleId(cycle);
@@ -116,6 +126,9 @@ export class CycleArbitrage {
           ...cycle,
           poolAddresses: [],
           cycleId,
+          // Use cycle-specific config if provided, otherwise use global defaults
+          minAmountIn: cycle.minAmountIn ?? globalMinAmountIn,
+          maxAmountIn: cycle.maxAmountIn ?? globalMaxAmountIn,
         });
       }
     }
@@ -294,14 +307,20 @@ export class CycleArbitrage {
     let optimalAmountIn = this.options.amountIn;
     let optimalArbBps = 0;
 
+    // Use cycle-specific min/max amounts (already set in constructor)
+    const minAmountIn = cycle.minAmountIn;
+    const maxAmountIn = cycle.maxAmountIn;
+
     // Initial optimization if enabled
     if (this.options.optimizeAmountIn) {
-      console.log(`[${cycleId}] Finding optimal amountIn...`);
+      console.log(
+        `[${cycleId}] Finding optimal amountIn (range: ${ethers.formatEther(minAmountIn)} - ${ethers.formatEther(maxAmountIn)})...`
+      );
       try {
         const optimal = await this.findOptimalAmountIn(
           cycleId,
-          this.options.minAmountIn,
-          this.options.maxAmountIn,
+          minAmountIn,
+          maxAmountIn,
           this.options.optimizationPrecision
         );
         optimalAmountIn = optimal.amountIn;
@@ -328,8 +347,8 @@ export class CycleArbitrage {
           try {
             const optimal = await this.findOptimalAmountIn(
               cycleId,
-              this.options.minAmountIn,
-              this.options.maxAmountIn,
+              minAmountIn,
+              maxAmountIn,
               this.options.optimizationPrecision
             );
             if (optimal.arbitrageBps > optimalArbBps) {
