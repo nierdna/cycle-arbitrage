@@ -62,6 +62,11 @@ export interface ArbitrageOptions {
   scanIntervalMs?: number;
   wssUrl?: string;
   amountIn?: bigint; // Default amount to test with
+  optimizeAmountIn?: boolean; // Enable amountIn optimization
+  minAmountIn?: bigint; // Minimum amount to search (default: 0.1 tokens)
+  maxAmountIn?: bigint; // Maximum amount to search (default: 100 tokens)
+  optimizationInterval?: number; // Re-optimize every N scans (default: 100)
+  optimizationPrecision?: bigint; // Precision for ternary search (default: 0.001 tokens)
 }
 
 /**
@@ -76,7 +81,14 @@ export class CycleArbitrage {
   private router?: ethers.Contract;
 
   private cycles: Map<string, CycleWithState> = new Map();
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl'>> & { wssUrl?: string };
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision'>> & {
+    wssUrl?: string;
+    optimizeAmountIn: boolean;
+    minAmountIn: bigint;
+    maxAmountIn: bigint;
+    optimizationInterval: number;
+    optimizationPrecision: bigint;
+  };
 
   constructor(
     provider: ethers.Provider,
@@ -89,6 +101,11 @@ export class CycleArbitrage {
       scanIntervalMs: options.scanIntervalMs ?? 10,
       amountIn: options.amountIn ?? BigInt(1e18), // 1 token (18 decimals)
       wssUrl: options.wssUrl,
+      optimizeAmountIn: options.optimizeAmountIn ?? false,
+      minAmountIn: options.minAmountIn ?? BigInt(1e17), // 0.1 tokens
+      maxAmountIn: options.maxAmountIn ?? BigInt(1e20), // 100 tokens
+      optimizationInterval: options.optimizationInterval ?? 100,
+      optimizationPrecision: options.optimizationPrecision ?? BigInt(1e15), // 0.001 tokens
     };
 
     // Initialize cycles from clusters
@@ -216,25 +233,128 @@ export class CycleArbitrage {
   }
 
   /**
-   * Scan a single cycle continuously
+   * Calculate arbitrage BPS for a given amountIn
+   */
+  private async calculateArbitrageBps(
+    cycleId: string,
+    amountIn: bigint
+  ): Promise<number> {
+    const amountOut = await this.estimateAmountOutForCycle(cycleId, amountIn);
+    return Number(
+      ((amountOut - amountIn) * BigInt(1e4)) / amountIn
+    );
+  }
+
+  /**
+   * Find optimal amountIn that maximizes arbitrageBps using Ternary Search
+   * Ternary search works well for unimodal functions (single peak)
+   */
+  private async findOptimalAmountIn(
+    cycleId: string,
+    minAmount: bigint,
+    maxAmount: bigint,
+    precision: bigint
+  ): Promise<{ amountIn: bigint; arbitrageBps: number }> {
+    let left = minAmount;
+    let right = maxAmount;
+
+    // Ternary search
+    while (right - left > precision) {
+      const third = (right - left) / 3n;
+      const mid1 = left + third;
+      const mid2 = right - third;
+
+      const [arb1, arb2] = await Promise.all([
+        this.calculateArbitrageBps(cycleId, mid1),
+        this.calculateArbitrageBps(cycleId, mid2),
+      ]);
+
+      if (arb1 > arb2) {
+        right = mid2;
+      } else {
+        left = mid1;
+      }
+    }
+
+    const optimalAmount = (left + right) / 2n;
+    const optimalArb = await this.calculateArbitrageBps(cycleId, optimalAmount);
+
+    return { amountIn: optimalAmount, arbitrageBps: optimalArb };
+  }
+
+  /**
+   * Scan a single cycle continuously with optional amountIn optimization
    */
   private async scanCycle(cycleId: string): Promise<void> {
     const cycle = this.cycles.get(cycleId);
     if (!cycle) return;
 
     let scanCount = 0;
+    let currentAmountIn = this.options.amountIn;
+    let optimalAmountIn = this.options.amountIn;
+    let optimalArbBps = 0;
+
+    // Initial optimization if enabled
+    if (this.options.optimizeAmountIn) {
+      console.log(`[${cycleId}] Finding optimal amountIn...`);
+      try {
+        const optimal = await this.findOptimalAmountIn(
+          cycleId,
+          this.options.minAmountIn,
+          this.options.maxAmountIn,
+          this.options.optimizationPrecision
+        );
+        optimalAmountIn = optimal.amountIn;
+        optimalArbBps = optimal.arbitrageBps;
+        currentAmountIn = optimalAmountIn;
+        console.log(
+          `[${cycleId}] Optimal: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
+          `arb: ${optimalArbBps.toFixed(2)} bps\n`
+        );
+      } catch (error) {
+        console.error(`[${cycleId}] Optimization failed:`, error);
+        console.log(`[${cycleId}] Using default amountIn: ${ethers.formatEther(this.options.amountIn)}\n`);
+      }
+    }
 
     while (true) {
       try {
+        // Re-optimize periodically if enabled
+        if (
+          this.options.optimizeAmountIn &&
+          scanCount > 0 &&
+          scanCount % this.options.optimizationInterval === 0
+        ) {
+          try {
+            const optimal = await this.findOptimalAmountIn(
+              cycleId,
+              this.options.minAmountIn,
+              this.options.maxAmountIn,
+              this.options.optimizationPrecision
+            );
+            if (optimal.arbitrageBps > optimalArbBps) {
+              optimalAmountIn = optimal.amountIn;
+              optimalArbBps = optimal.arbitrageBps;
+              currentAmountIn = optimalAmountIn;
+              console.log(
+                `[${cycleId}] Re-optimized: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
+                `arb: ${optimalArbBps.toFixed(2)} bps`
+              );
+            }
+          } catch (error) {
+            console.error(`[${cycleId}] Re-optimization failed:`, error);
+          }
+        }
+
         const amountOut = await this.estimateAmountOutForCycle(
           cycleId,
-          this.options.amountIn
+          currentAmountIn
         );
 
         // Calculate arbitrage in bps
         const arbitrageBps = Number(
-          ((amountOut - this.options.amountIn) * BigInt(1e4)) /
-          this.options.amountIn
+          ((amountOut - currentAmountIn) * BigInt(1e4)) /
+          currentAmountIn
         );
 
         scanCount++;
@@ -244,17 +364,35 @@ export class CycleArbitrage {
           console.log(`[${timestamp}] 🎯 Arbitrage detected!`);
           console.log(`  Cycle: ${cycle.tokens.join(' -> ')}`);
           console.log(`  Arbitrage: ${arbitrageBps.toFixed(2)} bps`);
-          console.log(`  Amount in:  ${ethers.formatEther(this.options.amountIn)}`);
+          console.log(`  Amount in:  ${ethers.formatEther(currentAmountIn)}`);
           console.log(`  Amount out: ${ethers.formatEther(amountOut)}`);
-          console.log(`  Profit:     ${ethers.formatEther(amountOut - this.options.amountIn)}\n`);
+          console.log(`  Profit:     ${ethers.formatEther(amountOut - currentAmountIn)}`);
+          if (this.options.optimizeAmountIn) {
+            console.log(
+              `  Optimal amount: ${ethers.formatEther(optimalAmountIn)} (arb: ${optimalArbBps.toFixed(2)} bps)`
+            );
+          }
+          console.log();
 
           // Execute if wallet/router is set
           if (this.wallet && this.router) {
-            await this.executeCycle(cycleId, this.options.amountIn, amountOut);
+            // Use optimal amount if available and better
+            const executeAmount =
+              this.options.optimizeAmountIn && optimalArbBps > arbitrageBps
+                ? optimalAmountIn
+                : currentAmountIn;
+
+            const executeAmountOut = await this.estimateAmountOutForCycle(
+              cycleId,
+              executeAmount
+            );
+
+            await this.executeCycle(cycleId, executeAmount, executeAmountOut);
           }
         } else if (scanCount % 1000 === 0) {
           console.log(
-            `[${new Date().toISOString()}] [${cycleId}] Scanning... (arb: ${arbitrageBps.toFixed(2)} bps, scans: ${scanCount})`
+            `[${new Date().toISOString()}] [${cycleId}] Scanning... ` +
+            `(arb: ${arbitrageBps.toFixed(2)} bps, amount: ${ethers.formatEther(currentAmountIn)}, scans: ${scanCount})`
           );
         }
 

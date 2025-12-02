@@ -29,36 +29,36 @@ async function main() {
 
   // Define cycle clusters
   const clusters = [
-    // {
-    //   cycles: [
-    //     {
-    //       tokens: ['USDT', 'WBNB', 'USDT'],
-    //       addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
-    //       fees: [500, 100], // 0.05%, 0.01%
-    //     },
-    //     {
-    //       tokens: ['USDT', 'WBNB', 'USDT'],
-    //       addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
-    //       fees: [100, 500], // 0.01%, 0.05%
-    //     },
-    //   ],
-    //   name: 'USDT-WBNB cluster',
-    // },
     {
       cycles: [
         {
-          tokens: ['USDT', 'ASTER', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
-          fees: [500, 2500], // 0.05%, 0.25%
+          tokens: ['USDT', 'WBNB', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
+          fees: [500, 100], // 0.05%, 0.01%
         },
-        {
-          tokens: ['USDT', 'ASTER', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
-          fees: [2500, 500], // 0.25%, 0.05%
-        },
+        // {
+        //   tokens: ['USDT', 'WBNB', 'USDT'],
+        //   addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
+        //   fees: [100, 500], // 0.01%, 0.05%
+        // },
       ],
-      name: 'USDT-ASTER cluster',
+      name: 'USDT-WBNB cluster',
     },
+    // {
+    //   cycles: [
+    // {
+    //   tokens: ['USDT', 'ASTER', 'USDT'],
+    //   addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
+    //   fees: [500, 2500], // 0.05%, 0.25%
+    // },
+    // {
+    //   tokens: ['USDT', 'ASTER', 'USDT'],
+    //   addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
+    //   fees: [2500, 500], // 0.25%, 0.05%
+    // },
+    //   ],
+    //   name: 'USDT-ASTER cluster',
+    // },
   ];
 
   // Create arbitrage instance
@@ -66,7 +66,13 @@ async function main() {
     minArbitrageBps: 2, // Minimum 2 bps profit
     scanIntervalMs: 1, // Scan every 1ms
     wssUrl: process.env.BSC_WSS_URL, // Optional: for real-time updates
-    amountIn: BigInt(1e18), // 1 USDT (18 decimals)
+    amountIn: BigInt(1e18), // 1 USDT (18 decimals) - fallback if optimization disabled
+    // Enable amountIn optimization using Ternary Search
+    optimizeAmountIn: true,
+    minAmountIn: BigInt(1e10), // 0.0001 USDT - minimum search range
+    maxAmountIn: BigInt(1e21), // 10 USDT - maximum search range
+    optimizationInterval: 100, // Re-optimize every 100 scans
+    optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
   });
 
   // Optional: Set execution (if you want to auto-execute)
