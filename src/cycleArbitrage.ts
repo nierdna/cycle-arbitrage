@@ -9,6 +9,8 @@ import winston from 'winston';
 import { createLogger } from './logger';
 import * as CONSTANTS from './constants';
 import { AmountOptimizer } from './optimization/amountOptimizer';
+import { MetricsCollector } from './monitoring/metrics';
+import { DashboardServer } from './monitoring/dashboard';
 
 export interface CycleConfig {
   tokens: string[]; // ["USDT", "WBNB", "USDT"]
@@ -43,6 +45,7 @@ export interface ArbitrageOptions {
   optimizationInterval?: number; // Re-optimize every N scans (default: 100)
   optimizationPrecision?: bigint; // Precision for ternary search (default: 0.001 tokens)
   logDir?: string; // Log directory path (default: 'log')
+  dashboardPort?: number; // HTTP dashboard port (default: undefined, disabled)
 }
 
 /**
@@ -57,9 +60,11 @@ export class CycleArbitrage {
   private router?: ethers.Contract;
   private logger: winston.Logger;
   private amountOptimizer?: AmountOptimizer;
+  private metrics: MetricsCollector;
+  private dashboard?: DashboardServer;
 
   private cycles: Map<string, CycleWithState> = new Map();
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir'>> & {
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
     minAmountIn: bigint;
@@ -67,6 +72,7 @@ export class CycleArbitrage {
     optimizationInterval: number;
     optimizationPrecision: bigint;
     logDir: string;
+    dashboardPort?: number;
   };
 
   constructor(
@@ -90,6 +96,16 @@ export class CycleArbitrage {
 
     // Initialize logger
     this.logger = createLogger(this.options.logDir);
+
+    // Initialize metrics collector
+    this.metrics = new MetricsCollector();
+
+    // Initialize dashboard if port is specified
+    if (options.dashboardPort) {
+      this.dashboard = new DashboardServer(this.metrics, options.dashboardPort);
+      this.dashboard.start();
+      this.logger.info(`Dashboard started on port ${options.dashboardPort}`);
+    }
 
     // Initialize cycles from clusters
     // Use global defaults from options (already set above)
@@ -275,6 +291,10 @@ export class CycleArbitrage {
         optimalAmountIn = optimal.amountIn;
         optimalArbBps = optimal.arbitrageBps;
         currentAmountIn = optimalAmountIn;
+        
+        // Record optimization result (best amountIn)
+        this.metrics.recordOptimizationResult(cycleId, optimalAmountIn, optimalArbBps);
+        
         this.logger.info(
           `[${cycleId}] Optimal: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
           `arb: ${optimalArbBps.toFixed(2)} bps`
@@ -287,6 +307,9 @@ export class CycleArbitrage {
 
     while (true) {
       try {
+        // Record scan
+        this.metrics.recordScan(cycleId);
+
         // Re-optimize periodically if enabled
         if (
           this.options.optimizeAmountIn &&
@@ -305,6 +328,10 @@ export class CycleArbitrage {
               optimalAmountIn = optimal.amountIn;
               optimalArbBps = optimal.arbitrageBps;
               currentAmountIn = optimalAmountIn;
+              
+              // Record optimization result (best amountIn)
+              this.metrics.recordOptimizationResult(cycleId, optimalAmountIn, optimalArbBps);
+              
               this.logger.info(
                 `[${cycleId}] Re-optimized: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
                 `arb: ${optimalArbBps.toFixed(2)} bps`
@@ -329,6 +356,9 @@ export class CycleArbitrage {
         scanCount++;
 
         if (arbitrageBps > this.options.minArbitrageBps) {
+          // Record opportunity với amountIn
+          this.metrics.recordOpportunity(cycleId, arbitrageBps, currentAmountIn);
+
           const timestamp = new Date().toISOString();
           this.logger.info('🎯 Arbitrage detected!', {
             cycle: cycle.tokens.join(' -> '),
@@ -430,7 +460,12 @@ export class CycleArbitrage {
       this.logger.info(`[${cycleId}] ✓ Swap confirmed: ${receipt.hash}`);
 
       // Analyze result
-      await this.analyze(receipt, amountIn);
+      const profit = await this.analyze(receipt, amountIn);
+
+      // Record execution
+      if (profit !== null) {
+        this.metrics.recordExecution(cycleId, profit);
+      }
     } catch (error: any) {
       this.logger.error(`[${cycleId}] ✗ Execution failed:`, error.message || error);
     }
@@ -438,22 +473,25 @@ export class CycleArbitrage {
 
   /**
    * Analyze trade result
+   * Returns profit amount (bigint) or null if parsing failed
    */
-  private async analyze(receipt: any, amountIn: bigint): Promise<void> {
+  private async analyze(receipt: any, amountIn: bigint): Promise<bigint | null> {
     try {
       // Parse Swap events from receipt
       const actualOut = await this.parseReceiptAmounts(receipt);
-      const profitBps = Number(
-        ((actualOut - amountIn) * BigInt(1e4)) / amountIn
-      );
+      const profit = actualOut - amountIn;
+      const profitBps = Number((profit * BigInt(1e4)) / amountIn);
 
       this.logger.info('Trade Analysis:', {
         profitBps: profitBps.toFixed(2),
         actualOut: ethers.formatEther(actualOut),
-        actualProfit: ethers.formatEther(actualOut - amountIn),
+        actualProfit: ethers.formatEther(profit),
       });
+
+      return profit;
     } catch (error) {
       this.logger.error('⚠ Could not parse receipt:', error);
+      return null;
     }
   }
 

@@ -41,12 +41,14 @@ async function main() {
           minAmountIn: BigInt(1e10), // 0.0001 USDT
           maxAmountIn: BigInt(1e19), // 10 USDT
         },
-        // {
-        //   tokens: ['USDT', 'WBNB', 'USDT'],
-        //   addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
-        //   fees: [100, 500], // 0.01%, 0.05%
-        //   // This cycle will use global defaults if not specified
-        // },
+        {
+          tokens: ['USDT', 'WBNB', 'USDT'],
+          addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
+          fees: [100, 500], // 0.01%, 0.05%
+          // This cycle will use global defaults if not specified
+          minAmountIn: BigInt(1e10), // 0.0001 USDT
+          maxAmountIn: BigInt(1e19), // 10 USDT
+        },
       ],
       name: 'USDT-WBNB cluster',
     },
@@ -99,6 +101,7 @@ async function main() {
     maxAmountIn: BigInt(1e21), // 10 USDT - maximum search range
     optimizationInterval: 100, // Re-optimize every 100 scans
     optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
+    dashboardPort: 8080, // Enable HTTP dashboard on port 8080
   });
 
   // Optional: Set execution (if you want to auto-execute)
