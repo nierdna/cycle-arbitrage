@@ -115,8 +115,9 @@ export class DashboardServer {
   }
 
   start(): void {
-    this.server = this.app.listen(this.port, () => {
-      console.log(`📊 Dashboard running on http://localhost:${this.port}`);
+    this.server = this.app.listen(this.port, '0.0.0.0', () => {
+      console.log(`📊 Dashboard running on http://0.0.0.0:${this.port}`);
+      console.log(`📊 Access from local: http://<server-ip>:${this.port}`);
     });
   }
 
