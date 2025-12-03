@@ -3,7 +3,7 @@
  * Tracks statistics for cycle arbitrage operations
  */
 
-import { HistoryPersistence } from './historyPersistence';
+import { HistoryPersistence } from './historyPersistence.js';
 
 export interface CycleMetrics {
   cycleId: string;

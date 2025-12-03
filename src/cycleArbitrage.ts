@@ -6,11 +6,11 @@
 import { ethers } from 'ethers';
 import { QuoterV3, StateFetcher } from 'uniswap-v3-quoter';
 import winston from 'winston';
-import { createLogger } from './logger';
-import * as CONSTANTS from './constants';
-import { AmountOptimizer } from './optimization/amountOptimizer';
-import { MetricsCollector } from './monitoring/metrics';
-import { DashboardServer } from './monitoring/dashboard';
+import { createLogger } from './logger.js';
+import * as CONSTANTS from './constants.js';
+import { AmountOptimizer } from './optimization/amountOptimizer.js';
+import { MetricsCollector } from './monitoring/metrics.js';
+import { DashboardServer } from './monitoring/dashboard.js';
 
 export interface CycleConfig {
   tokens: string[]; // ["USDT", "WBNB", "USDT"]

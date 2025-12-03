@@ -6,7 +6,7 @@
 
 import { promises as fs } from 'fs';
 import path from 'path';
-import { HistoricalDataPoint } from './metrics';
+import { HistoricalDataPoint } from './metrics.js';
 
 export class HistoryPersistence {
   private historyDir: string;

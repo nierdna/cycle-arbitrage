@@ -5,7 +5,7 @@
 
 import express, { Express, Request, Response } from 'express';
 import { ethers } from 'ethers';
-import { MetricsCollector } from './metrics';
+import { MetricsCollector } from './metrics.js';
 
 export class DashboardServer {
   private app: Express;

@@ -7,9 +7,18 @@
   "scripts": {
     "build": "tsc",
     "start": "tsx examples/main.ts",
-    "dev": "tsx watch examples/main.ts"
+    "start:prod": "node dist/examples/main.js",
+    "dev": "tsx watch examples/main.ts",
+    "pm2:start": "npm run build && pm2 start ecosystem.config.cjs --only cycle-arbitrage",
+    "pm2:start:dev": "pm2 start ecosystem.config.cjs --only cycle-arbitrage-dev",
+    "pm2:stop": "pm2 stop cycle-arbitrage",
+    "pm2:restart": "pm2 restart cycle-arbitrage",
+    "pm2:logs": "pm2 logs cycle-arbitrage",
+    "pm2:status": "pm2 status",
+    "pm2:delete": "pm2 delete cycle-arbitrage"
   },
   "dependencies": {
+    "dotenv": "^17.2.3",
     "ethers": "^6.9.0",
     "express": "^4.18.2",
     "uniswap-v3-quoter": "^0.3.0",

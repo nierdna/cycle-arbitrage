@@ -2,14 +2,16 @@
  * Example: Cycle Arbitrage MVP
  * 
  * Usage:
- *   export BSC_RPC_URL=https://bsc-dataseed.binance.org/
- *   export BSC_WSS_URL=wss://... (optional, for real-time updates)
- *   export PRIVATE_KEY=0x... (optional, for execution)
+ *   Create .env file or export environment variables:
+ *   BSC_RPC_URL=https://bsc-dataseed.binance.org/
+ *   BSC_WSS_URL=wss://... (optional, for real-time updates)
+ *   PRIVATE_KEY=0x... (optional, for execution)
  *   npm start
  */
 
+import 'dotenv/config';
 import { ethers } from 'ethers';
-import { CycleArbitrage } from '../src/cycleArbitrage';
+import { CycleArbitrage } from '../src/cycleArbitrage.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
 
 // Token addresses on BSC (from execution/web3pro/const.py)
