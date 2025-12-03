@@ -46,6 +46,7 @@ export interface ArbitrageOptions {
   optimizationPrecision?: bigint; // Precision for ternary search (default: 0.001 tokens)
   logDir?: string; // Log directory path (default: 'log')
   dashboardPort?: number; // HTTP dashboard port (default: undefined, disabled)
+  historyDir?: string; // History data directory path (default: 'data/history')
 }
 
 /**
@@ -64,7 +65,7 @@ export class CycleArbitrage {
   private dashboard?: DashboardServer;
 
   private cycles: Map<string, CycleWithState> = new Map();
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort'>> & {
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
     minAmountIn: bigint;
@@ -72,6 +73,7 @@ export class CycleArbitrage {
     optimizationInterval: number;
     optimizationPrecision: bigint;
     logDir: string;
+    historyDir: string;
     dashboardPort?: number;
   };
 
@@ -92,13 +94,14 @@ export class CycleArbitrage {
       optimizationInterval: options.optimizationInterval ?? 100,
       optimizationPrecision: options.optimizationPrecision ?? BigInt(1e15), // 0.001 tokens
       logDir: options.logDir ?? 'log',
+      historyDir: options.historyDir ?? 'data/history',
     };
 
     // Initialize logger
     this.logger = createLogger(this.options.logDir);
 
-    // Initialize metrics collector
-    this.metrics = new MetricsCollector();
+    // Initialize metrics collector with history persistence
+    this.metrics = new MetricsCollector(this.options.historyDir);
 
     // Initialize dashboard if port is specified
     if (options.dashboardPort) {
@@ -354,6 +357,11 @@ export class CycleArbitrage {
         );
 
         scanCount++;
+
+        // Record arbitrage BPS for historical chart (every 1000 scans)
+        if (scanCount % 1000 === 0) {
+          this.metrics.recordArbitrageBps(cycleId, arbitrageBps);
+        }
 
         if (arbitrageBps > this.options.minArbitrageBps) {
           // Record opportunity với amountIn

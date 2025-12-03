@@ -73,7 +73,7 @@ export class DashboardServer {
     });
 
     // Historical data endpoint
-    this.app.get('/api/history', (req: Request, res: Response) => {
+    this.app.get('/api/history', async (req: Request, res: Response) => {
       const cycleId = req.query.cycleId as string;
       const hours = parseInt(req.query.hours as string) || 0;
       const minutes = parseInt(req.query.minutes as string) || 0;
@@ -84,23 +84,28 @@ export class DashboardServer {
         return;
       }
       
-      // Calculate time range
-      const endTime = Date.now();
-      const startTime = endTime - (
-        (days * 24 * 60 * 60 * 1000) +
-        (hours * 60 * 60 * 1000) +
-        (minutes * 60 * 1000)
-      );
-      
-      const data = this.metrics.getHistoricalData(cycleId, startTime, endTime);
-      
-      res.json({
-        cycleId,
-        data,
-        count: data.length,
-        startTime,
-        endTime,
-      });
+      try {
+        // Calculate time range
+        const endTime = Date.now();
+        const startTime = endTime - (
+          (days * 24 * 60 * 60 * 1000) +
+          (hours * 60 * 60 * 1000) +
+          (minutes * 60 * 1000)
+        );
+        
+        const data = await this.metrics.getHistoricalData(cycleId, startTime, endTime);
+        
+        res.json({
+          cycleId,
+          data,
+          count: data.length,
+          startTime,
+          endTime,
+        });
+      } catch (err: any) {
+        console.error('Error loading historical data:', err);
+        res.status(500).json({ error: err.message });
+      }
     });
 
     // Simple HTML dashboard
@@ -263,6 +268,7 @@ export class DashboardServer {
           <option value="">Select Cycle</option>
         </select>
         <select id="chartTimeRange" style="padding: 8px 12px; background: #2d3561; color: #e0e0e0; border: 1px solid #3d4561; border-radius: 5px; font-size: 14px; cursor: pointer;">
+          <option value="1">Last 1 minute</option>
           <option value="15">Last 15 minutes</option>
           <option value="60" selected>Last 1 hour</option>
           <option value="240">Last 4 hours</option>
