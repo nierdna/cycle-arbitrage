@@ -7,41 +7,8 @@ import { ethers } from 'ethers';
 import { QuoterV3, StateFetcher } from 'uniswap-v3-quoter';
 import winston from 'winston';
 import { createLogger } from './logger';
-
-// BSC Contract Addresses
-const PANCAKE_V3_FACTORY = '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865';
-const BITSWAP_V3_ROUTER = '0xb5DFcaC19B4f4f64e9e641D2096d0a80341C655d';
-
-// Factory ABI (minimal)
-const FACTORY_ABI = [
-  'function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)',
-];
-
-// Router ABI (minimal - only swapExactInput)
-const ROUTER_ABI = [
-  {
-    name: 'swapExactInput',
-    type: 'function',
-    stateMutability: 'nonpayable',
-    inputs: [
-      {
-        name: 'params',
-        type: 'tuple',
-        components: [
-          { name: 'path', type: 'bytes' },
-          { name: 'recipient', type: 'address' },
-          { name: 'deadline', type: 'uint256' },
-          { name: 'amountIn', type: 'uint256' },
-          { name: 'amountOutMinimum', type: 'uint256' },
-        ],
-      },
-    ],
-    outputs: [{ name: 'amountOut', type: 'uint256' }],
-  },
-];
-
-// Swap event signature
-const SWAP_EVENT_TOPIC = '0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83';
+import * as CONSTANTS from './constants';
+import { AmountOptimizer } from './optimization/amountOptimizer';
 
 export interface CycleConfig {
   tokens: string[]; // ["USDT", "WBNB", "USDT"]
@@ -89,6 +56,7 @@ export class CycleArbitrage {
   private wallet?: ethers.Wallet;
   private router?: ethers.Contract;
   private logger: winston.Logger;
+  private amountOptimizer?: AmountOptimizer;
 
   private cycles: Map<string, CycleWithState> = new Map();
   private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir'>> & {
@@ -155,7 +123,28 @@ export class CycleArbitrage {
     );
 
     this.quoter = new QuoterV3(this.stateFetcher);
-    this.factory = new ethers.Contract(PANCAKE_V3_FACTORY, FACTORY_ABI, this.provider);
+    this.factory = new ethers.Contract(CONSTANTS.PANCAKE_V3_FACTORY, CONSTANTS.FACTORY_ABI, this.provider);
+
+    // Initialize AmountOptimizer if optimization is enabled
+    if (this.options.optimizeAmountIn) {
+      this.amountOptimizer = new AmountOptimizer(
+        (cycleId: string, amountIn: bigint) => this.calculateArbitrageBps(cycleId, amountIn)
+      );
+    }
+  }
+
+  /**
+   * Calculate arbitrage BPS for a given amountIn
+   * Used by AmountOptimizer
+   */
+  private async calculateArbitrageBps(
+    cycleId: string,
+    amountIn: bigint
+  ): Promise<number> {
+    const amountOut = await this.estimateAmountOutForCycle(cycleId, amountIn);
+    return Number(
+      ((amountOut - amountIn) * BigInt(1e4)) / amountIn
+    );
   }
 
   /**
@@ -170,7 +159,7 @@ export class CycleArbitrage {
    */
   setExecution(wallet: ethers.Wallet): void {
     this.wallet = wallet;
-    this.router = new ethers.Contract(BITSWAP_V3_ROUTER, ROUTER_ABI, wallet);
+    this.router = new ethers.Contract(CONSTANTS.BITSWAP_V3_ROUTER, CONSTANTS.ROUTER_ABI, wallet);
   }
 
   /**
@@ -254,55 +243,6 @@ export class CycleArbitrage {
     return amountOut;
   }
 
-  /**
-   * Calculate arbitrage BPS for a given amountIn
-   */
-  private async calculateArbitrageBps(
-    cycleId: string,
-    amountIn: bigint
-  ): Promise<number> {
-    const amountOut = await this.estimateAmountOutForCycle(cycleId, amountIn);
-    return Number(
-      ((amountOut - amountIn) * BigInt(1e4)) / amountIn
-    );
-  }
-
-  /**
-   * Find optimal amountIn that maximizes arbitrageBps using Ternary Search
-   * Ternary search works well for unimodal functions (single peak)
-   */
-  private async findOptimalAmountIn(
-    cycleId: string,
-    minAmount: bigint,
-    maxAmount: bigint,
-    precision: bigint
-  ): Promise<{ amountIn: bigint; arbitrageBps: number }> {
-    let left = minAmount;
-    let right = maxAmount;
-
-    // Ternary search
-    while (right - left > precision) {
-      const third = (right - left) / 3n;
-      const mid1 = left + third;
-      const mid2 = right - third;
-
-      const [arb1, arb2] = await Promise.all([
-        this.calculateArbitrageBps(cycleId, mid1),
-        this.calculateArbitrageBps(cycleId, mid2),
-      ]);
-
-      if (arb1 > arb2) {
-        right = mid2;
-      } else {
-        left = mid1;
-      }
-    }
-
-    const optimalAmount = (left + right) / 2n;
-    const optimalArb = await this.calculateArbitrageBps(cycleId, optimalAmount);
-
-    return { amountIn: optimalAmount, arbitrageBps: optimalArb };
-  }
 
   /**
    * Scan a single cycle continuously with optional amountIn optimization
@@ -321,12 +261,12 @@ export class CycleArbitrage {
     const maxAmountIn = cycle.maxAmountIn;
 
     // Initial optimization if enabled
-    if (this.options.optimizeAmountIn) {
+    if (this.options.optimizeAmountIn && this.amountOptimizer) {
       this.logger.info(
         `[${cycleId}] Finding optimal amountIn (range: ${ethers.formatEther(minAmountIn)} - ${ethers.formatEther(maxAmountIn)})...`
       );
       try {
-        const optimal = await this.findOptimalAmountIn(
+        const optimal = await this.amountOptimizer.findOptimalAmountIn(
           cycleId,
           minAmountIn,
           maxAmountIn,
@@ -350,11 +290,12 @@ export class CycleArbitrage {
         // Re-optimize periodically if enabled
         if (
           this.options.optimizeAmountIn &&
+          this.amountOptimizer &&
           scanCount > 0 &&
           scanCount % this.options.optimizationInterval === 0
         ) {
           try {
-            const optimal = await this.findOptimalAmountIn(
+            const optimal = await this.amountOptimizer.findOptimalAmountIn(
               cycleId,
               minAmountIn,
               maxAmountIn,
@@ -566,7 +507,7 @@ export class CycleArbitrage {
   private async parseReceiptAmounts(receipt: any): Promise<bigint> {
     // Find Swap events
     const swapLogs = receipt.logs.filter(
-      (log: any) => log.topics[0] === SWAP_EVENT_TOPIC
+      (log: any) => log.topics[0] === CONSTANTS.SWAP_EVENT_TOPIC
     );
 
     if (swapLogs.length === 0) {
@@ -578,27 +519,7 @@ export class CycleArbitrage {
 
     // Decode the data field
     // Swap event data: amount0, amount1, sqrtPriceX96, liquidity, tick, fee0, fee1
-    // We need to decode this properly - for now, return a placeholder
-    // In production, you should decode using ethers Interface
-    const poolAbi = [
-      {
-        type: 'event',
-        name: 'Swap',
-        inputs: [
-          { indexed: true, name: 'sender', type: 'address' },
-          { indexed: true, name: 'recipient', type: 'address' },
-          { indexed: false, name: 'amount0', type: 'int256' },
-          { indexed: false, name: 'amount1', type: 'int256' },
-          { indexed: false, name: 'sqrtPriceX96', type: 'uint160' },
-          { indexed: false, name: 'liquidity', type: 'uint128' },
-          { indexed: false, name: 'tick', type: 'int24' },
-          { indexed: false, name: 'protocolFeesToken0', type: 'uint128' },
-          { indexed: false, name: 'protocolFeesToken1', type: 'uint128' },
-        ],
-      },
-    ];
-
-    const poolInterface = new ethers.Interface(poolAbi);
+    const poolInterface = new ethers.Interface(CONSTANTS.POOL_SWAP_ABI);
     const decoded = poolInterface.parseLog({
       topics: lastSwap.topics,
       data: lastSwap.data,
