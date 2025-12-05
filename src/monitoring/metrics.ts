@@ -22,9 +22,9 @@ export interface CycleMetrics {
 }
 
 export interface HistoricalDataPoint {
-  timestamp: number;
+  timestamp: number; // Unix timestamp in milliseconds
   cycleId: string;
-  arbitrageBps: number | null; // from opportunity
+  arbitrageBps: number | null; // from opportunity (aggregated by second)
   bestAmountInArbBps: number | null; // from optimization
 }
 
@@ -40,6 +40,16 @@ export interface Metrics {
   lastUpdate: number;
 }
 
+/**
+ * Buffer to track opportunities within the same second
+ */
+interface SecondBuffer {
+  second: number; // Unix timestamp in seconds
+  arbitrageBpsValues: number[]; // All arbitrage BPS values in this second
+  amountIns: (bigint | undefined)[]; // Corresponding amountIns
+  timestamps: number[]; // Exact timestamps in milliseconds
+}
+
 export class MetricsCollector {
   private metrics: Metrics;
   private historicalData: HistoricalDataPoint[] = [];
@@ -49,6 +59,9 @@ export class MetricsCollector {
   private saveBatchSize: number = 100; // Save to file every N points
   private saveIntervalMs: number = 60000; // Also save every 60 seconds
   private saveInterval?: NodeJS.Timeout;
+
+  // Track opportunities within the same second for each cycle
+  private pendingOpportunities: Map<string, SecondBuffer> = new Map();
 
   constructor(historyDir?: string) {
     this.metrics = {
@@ -90,6 +103,17 @@ export class MetricsCollector {
    */
   private startPeriodicSave(): void {
     this.saveInterval = setInterval(async () => {
+      // Flush old pending opportunities (older than 2 seconds)
+      const nowSecond = Math.floor(Date.now() / 1000);
+      for (const [cycleId, buffer] of this.pendingOpportunities) {
+        if (buffer.second < nowSecond - 1) {
+          // Buffer is at least 2 seconds old, flush it
+          this.flushPendingOpportunities(cycleId, buffer);
+          this.pendingOpportunities.delete(cycleId);
+        }
+      }
+
+      // Flush save batch
       if (this.saveBatch.length > 0) {
         await this.flushSaveBatch();
       }
@@ -97,7 +121,70 @@ export class MetricsCollector {
   }
 
   /**
-   * Flush save batch to disk
+   * Group historical data points by second (aggregate multiple points in same second)
+   */
+  private groupHistoricalDataBySecond(points: HistoricalDataPoint[]): HistoricalDataPoint[] {
+    // Group by cycleId and second (timestamp rounded to second)
+    const grouped = new Map<string, {
+      cycleId: string;
+      second: number;
+      arbitrageBpsValues: number[];
+      bestAmountInArbBpsValues: number[];
+      timestamps: number[];
+    }>();
+
+    for (const point of points) {
+      const second = Math.floor(point.timestamp / 1000);
+      const key = `${point.cycleId}-${second}`;
+
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          cycleId: point.cycleId,
+          second,
+          arbitrageBpsValues: [],
+          bestAmountInArbBpsValues: [],
+          timestamps: [],
+        });
+      }
+
+      const group = grouped.get(key)!;
+      group.timestamps.push(point.timestamp);
+
+      if (point.arbitrageBps !== null) {
+        group.arbitrageBpsValues.push(point.arbitrageBps);
+      }
+      if (point.bestAmountInArbBps !== null) {
+        group.bestAmountInArbBpsValues.push(point.bestAmountInArbBps);
+      }
+    }
+
+    // Aggregate each group into one point
+    const aggregated: HistoricalDataPoint[] = [];
+    for (const group of grouped.values()) {
+      const avgArbitrageBps = group.arbitrageBpsValues.length > 0
+        ? group.arbitrageBpsValues.reduce((sum, val) => sum + val, 0) / group.arbitrageBpsValues.length
+        : null;
+
+      const avgBestAmountInArbBps = group.bestAmountInArbBpsValues.length > 0
+        ? group.bestAmountInArbBpsValues.reduce((sum, val) => sum + val, 0) / group.bestAmountInArbBpsValues.length
+        : null;
+
+      // Use middle timestamp as representative
+      const representativeTimestamp = group.timestamps[Math.floor(group.timestamps.length / 2)];
+
+      aggregated.push({
+        timestamp: representativeTimestamp,
+        cycleId: group.cycleId,
+        arbitrageBps: avgArbitrageBps,
+        bestAmountInArbBps: avgBestAmountInArbBps,
+      });
+    }
+
+    return aggregated.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
+  /**
+   * Flush save batch to disk (with grouping by second)
    */
   private async flushSaveBatch(): Promise<void> {
     if (this.saveBatch.length === 0) return;
@@ -106,7 +193,9 @@ export class MetricsCollector {
     this.saveBatch = [];
     
     try {
-      await this.historyPersistence.saveDataPoints(toSave);
+      // Group by second before saving
+      const grouped = this.groupHistoricalDataBySecond(toSave);
+      await this.historyPersistence.saveDataPoints(grouped);
     } catch (err: any) {
       console.error('Error saving historical data to disk:', err);
       // Put back to batch for retry (but limit size to prevent memory issues)
@@ -124,6 +213,13 @@ export class MetricsCollector {
       clearInterval(this.saveInterval);
       this.saveInterval = undefined;
     }
+
+    // Flush all pending opportunities before stopping
+    for (const [cycleId, buffer] of this.pendingOpportunities) {
+      this.flushPendingOpportunities(cycleId, buffer);
+    }
+    this.pendingOpportunities.clear();
+
     // Flush remaining data
     this.flushSaveBatch().catch(err => {
       console.error('Error flushing save batch on stop:', err);
@@ -137,36 +233,83 @@ export class MetricsCollector {
     this.metrics.lastUpdate = Date.now();
   }
 
-  recordOpportunity(cycleId: string, arbitrageBps: number, amountIn?: bigint): void {
+  /**
+   * Flush pending opportunities from previous second and record as one opportunity
+   */
+  private flushPendingOpportunities(cycleId: string, buffer: SecondBuffer): void {
+    if (buffer.arbitrageBpsValues.length === 0) return;
+
+    // Calculate aggregated values
+    const avgArbitrage = buffer.arbitrageBpsValues.reduce((sum, val) => sum + val, 0) / buffer.arbitrageBpsValues.length;
+    const bestArbitrage = Math.max(...buffer.arbitrageBpsValues);
+    const worstArbitrage = Math.min(...buffer.arbitrageBpsValues);
+    const bestIndex = buffer.arbitrageBpsValues.indexOf(bestArbitrage);
+    const bestAmountIn = buffer.amountIns[bestIndex];
+    const representativeTimestamp = buffer.timestamps[Math.floor(buffer.timestamps.length / 2)]; // Use middle timestamp
+
+  // Record as ONE opportunity
     this.metrics.totalOpportunities++;
     const cycle = this.getOrCreateCycle(cycleId);
     cycle.opportunities++;
     
     // Update best arbitrage and best amountIn
-    if (arbitrageBps > cycle.bestArbitrage) {
-      cycle.bestArbitrage = arbitrageBps;
-      if (amountIn !== undefined) {
-        cycle.bestAmountIn = amountIn;
-        cycle.bestAmountInArbBps = arbitrageBps;
+    if (bestArbitrage > cycle.bestArbitrage) {
+      cycle.bestArbitrage = bestArbitrage;
+      if (bestAmountIn !== undefined) {
+        cycle.bestAmountIn = bestAmountIn;
+        cycle.bestAmountInArbBps = bestArbitrage;
       }
     }
     
-    cycle.worstArbitrage = Math.min(cycle.worstArbitrage, arbitrageBps);
-    cycle.lastOpportunity = Date.now();
-    cycle.lastArbitrageBps = arbitrageBps;
-    // Update average
+    cycle.worstArbitrage = Math.min(cycle.worstArbitrage, worstArbitrage);
+    cycle.lastOpportunity = representativeTimestamp;
+    cycle.lastArbitrageBps = bestArbitrage;
+
+    // Update average (using running average formula)
     cycle.avgArbitrage =
-      (cycle.avgArbitrage * (cycle.opportunities - 1) + arbitrageBps) /
+      (cycle.avgArbitrage * (cycle.opportunities - 1) + avgArbitrage) /
       cycle.opportunities;
+
     this.metrics.lastUpdate = Date.now();
     
-    // Record historical data point
+    // Record aggregated historical data point (one per second)
     this.addHistoricalDataPoint({
-      timestamp: Date.now(),
+      timestamp: representativeTimestamp,
       cycleId,
-      arbitrageBps,
+      arbitrageBps: avgArbitrage, // Store average for chart
       bestAmountInArbBps: null,
     });
+  }
+
+  recordOpportunity(cycleId: string, arbitrageBps: number, amountIn?: bigint): void {
+    const now = Date.now();
+    const currentSecond = Math.floor(now / 1000);
+
+    // Get or create buffer for this cycle
+    let buffer = this.pendingOpportunities.get(cycleId);
+
+    // Check if we need to flush previous second
+    if (buffer && buffer.second !== currentSecond) {
+      // Flush opportunities from previous second
+      this.flushPendingOpportunities(cycleId, buffer);
+      buffer = undefined; // Reset for new second
+    }
+
+    // Initialize buffer if needed
+    if (!buffer) {
+      buffer = {
+        second: currentSecond,
+        arbitrageBpsValues: [],
+        amountIns: [],
+        timestamps: [],
+      };
+      this.pendingOpportunities.set(cycleId, buffer);
+    }
+
+    // Add to buffer (same second)
+    buffer.arbitrageBpsValues.push(arbitrageBps);
+    buffer.amountIns.push(amountIn);
+    buffer.timestamps.push(now);
   }
 
   recordExecution(cycleId: string, profit: bigint): void {
@@ -239,7 +382,7 @@ export class MetricsCollector {
   
   /**
    * Get historical data for a cycle within time range
-   * Loads from both memory and disk files
+   * Loads from both memory and disk files, grouped by second
    */
   async getHistoricalData(cycleId: string, startTime?: number, endTime?: number): Promise<HistoricalDataPoint[]> {
     const now = Date.now();
@@ -262,19 +405,23 @@ export class MetricsCollector {
       console.warn('Warning: Could not load historical data from disk:', err.message);
     }
     
-    // Merge and deduplicate
+    // Merge all data (may have duplicates if same data in memory and disk)
     const allData = new Map<string, HistoricalDataPoint>();
     
     for (const point of [...memoryData, ...diskData]) {
       const key = `${point.timestamp}-${point.cycleId}`;
-      // Keep the latest one if duplicate
+      // Keep the latest one if duplicate (by exact timestamp)
       if (!allData.has(key) || allData.get(key)!.timestamp < point.timestamp) {
         allData.set(key, point);
       }
     }
     
-    // Sort by timestamp
-    return Array.from(allData.values()).sort((a, b) => a.timestamp - b.timestamp);
+    // Convert to array and group by second
+    const allPoints = Array.from(allData.values());
+    const grouped = this.groupHistoricalDataBySecond(allPoints);
+
+    // Filter by cycleId again (in case grouping created issues)
+    return grouped.filter(point => point.cycleId === cycleId).sort((a, b) => a.timestamp - b.timestamp);
   }
 
   getMetrics(): Metrics {
