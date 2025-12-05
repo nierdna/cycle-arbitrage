@@ -71,7 +71,8 @@ async function main() {
     optimizationInterval: 100, // Re-optimize every 100 scans
     optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
     dashboardPort: 8080, // Enable HTTP dashboard on port 8080
-    discoveryFees: [100, 500, 2500, 10000],
+    discoveryFees: [100, 500],
+    // discoveryFees: [100, 500, 2500, 10000],
   });
 
   // Optional: Set execution (if you want to auto-execute)

@@ -1,6 +1,6 @@
 /**
- * Cycle Arbitrage - Support Cycle Clusters
- * Minimal implementation for cycle arbitrage on PancakeSwap V3
+ * Cycle Arbitrage - Auto-Discovery Mode
+ * Orchestrates cycle discovery, scanning, and execution
  */
 
 import { ethers } from 'ethers';
@@ -14,6 +14,12 @@ import { DashboardServer } from './monitoring/dashboard.js';
 import { PoolMatrixBuilder } from './poolMatrix/poolMatrixBuilder.js';
 import { PathFinder } from './poolMatrix/pathFinder.js';
 import { TokenRegistry } from './tokens/tokenRegistry.js';
+import {
+  CycleDiscoveryService,
+  CycleFormatter,
+  CycleScanner,
+  TradeExecutor,
+} from './services/index.js';
 
 export interface TokenAmountConfig {
   minAmountIn: bigint;
@@ -30,7 +36,7 @@ export interface CycleConfig {
 }
 
 
-interface CycleWithState extends CycleConfig {
+export interface CycleWithState extends CycleConfig {
   poolAddresses: string[];
   cycleId: string;
   // These will be set from cycle config or global defaults
@@ -70,6 +76,9 @@ export class CycleArbitrage {
   private poolMatrixBuilder: PoolMatrixBuilder;
   private pathFinder: PathFinder;
   private tokenRegistry: TokenRegistry;
+  private cycleDiscovery: CycleDiscoveryService;
+  private formatter: CycleFormatter;
+  private tradeExecutor?: TradeExecutor;
 
   private cycles: Map<string, CycleWithState> = new Map();
   private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees'>> & {
@@ -123,6 +132,15 @@ export class CycleArbitrage {
     this.poolMatrixBuilder = new PoolMatrixBuilder(provider);
     this.pathFinder = new PathFinder();
 
+    // Initialize services
+    this.cycleDiscovery = new CycleDiscoveryService(
+      this.poolMatrixBuilder,
+      this.pathFinder,
+      this.tokenRegistry,
+      this.logger
+    );
+    this.formatter = new CycleFormatter(this.tokenRegistry);
+
     // Initialize StateFetcher with WebSocket
     this.stateFetcher = new StateFetcher(
       provider,
@@ -150,93 +168,26 @@ export class CycleArbitrage {
    * Builds pool matrix and finds all valid cycles
    */
   async discoverCycles(): Promise<CycleConfig[]> {
-    this.logger.info('=== Auto-Discovery Mode ===');
-    const tokenAddresses = this.tokenRegistry.getAllAddresses();
-    this.logger.info(`Token list: ${this.tokenRegistry.size} tokens`);
-    this.logger.info(`Max hops: ${this.options.maxHops}`);
-    this.logger.info(`Discovery fees: ${this.options.discoveryFees.join(', ')} bps`);
-
-    // Build pool matrix
-    this.logger.info('Building pool matrix...');
-    const matrix = await this.poolMatrixBuilder.buildPoolMatrix(
-      tokenAddresses,
+    const cyclesWithAmounts = await this.cycleDiscovery.discoverCycles(
+      this.options.maxHops,
       this.options.discoveryFees
     );
-    this.logger.info(`Found ${matrix.pools.size} token pairs with pools`);
-
-    // Find all cycles for each token
-    this.logger.info('Discovering cycles...');
-    const allCycles: CycleConfig[] = [];
-    const seenCycles = new Set<string>();
-
-    for (const tokenAddress of tokenAddresses) {
-      const cycles = this.pathFinder.findAllCycles(matrix, tokenAddress, this.options.maxHops);
-
-      for (const candidate of cycles) {
-        // Validate cycle
-        if (!this.pathFinder.validateCycle(candidate, matrix)) {
-          continue;
-        }
-
-        // Deduplicate
-        const cycleKey = `${candidate.tokens.join('-')}-${candidate.fees.join('-')}`;
-        if (seenCycles.has(cycleKey)) {
-          continue;
-        }
-        seenCycles.add(cycleKey);
-
-        // Convert to CycleConfig
-        allCycles.push({
-          tokens: candidate.tokens,
-          addresses: candidate.addresses,
-          fees: candidate.fees,
-        });
-      }
-    }
-
-    this.logger.info(`Discovered ${allCycles.length} valid cycles`);
 
     // Log cycles with readable format
-    for (let i = 0; i < allCycles.length; i++) {
-      const cycle = allCycles[i];
-      const tokensPath = this.formatCyclePath(cycle.tokens);
-      const feesStr = cycle.fees.join(', ');
-      this.logger.info(`  [${i + 1}] ${tokensPath} | fees: [${feesStr}] bps`);
+    for (let i = 0; i < cyclesWithAmounts.length; i++) {
+      const cycle = cyclesWithAmounts[i];
+      this.logger.info(this.formatter.formatCycleForLog(cycle, i));
     }
 
     // Register cycles for monitoring
-    for (const cycle of allCycles) {
-      const cycleId = this.getCycleId(cycle);
-      const startTokenAddress = cycle.addresses[0].toLowerCase(); // Start token (first token in cycle)
-
-      // Priority: cycle.minAmountIn > tokenRegistry.getTokenAmountConfig(startToken)
-      let minAmountIn = cycle.minAmountIn;
-      let maxAmountIn = cycle.maxAmountIn;
-
-      // If cycle doesn't specify, get from tokenRegistry (required)
-      if (!minAmountIn || !maxAmountIn) {
-        const token = this.tokenRegistry.getToken(startTokenAddress);
-        if (!token?.amountConfig) {
-          this.logger.warn(
-            `Token ${startTokenAddress} does not have amountConfig. ` +
-            `Cycle ${cycleId} will be skipped. Please add amountConfig to token in TokenRegistry.`
-          );
-          continue; // Skip cycles without amount config
-        }
-        minAmountIn = minAmountIn ?? token.amountConfig.minAmountIn;
-        maxAmountIn = maxAmountIn ?? token.amountConfig.maxAmountIn;
-      }
-
-      this.cycles.set(cycleId, {
+    for (const cycle of cyclesWithAmounts) {
+      this.cycles.set(cycle.cycleId, {
         ...cycle,
         poolAddresses: [],
-        cycleId,
-        minAmountIn,
-        maxAmountIn,
       });
     }
 
-    return allCycles;
+    return cyclesWithAmounts;
   }
 
   /**
@@ -253,32 +204,19 @@ export class CycleArbitrage {
     );
   }
 
-  /**
-   * Generate unique ID for cycle
-   */
-  private getCycleId(cycle: CycleConfig): string {
-    return `${cycle.tokens.join('-')}-${cycle.fees.join('-')}`;
-  }
-
-  /**
-   * Format cycle path with token names if available
-   * Example: "USDT -> WBNB -> USDT" or "0x123... -> 0x456... -> 0x123..."
-   */
-  private formatCyclePath(tokens: string[]): string {
-    return tokens
-      .map((tokenAddress) => {
-        const token = this.tokenRegistry.getToken(tokenAddress);
-        return token?.displayName || `${tokenAddress.slice(0, 6)}...${tokenAddress.slice(-4)}`;
-      })
-      .join(' -> ');
-  }
 
   /**
    * Set wallet and router for execution (optional - for execution mode)
    */
   setExecution(wallet: ethers.Wallet): void {
-    this.wallet = wallet;
+    this.wallet = wallet; // Store for potential future use
     this.router = new ethers.Contract(CONSTANTS.BITSWAP_V3_ROUTER, CONSTANTS.ROUTER_ABI, wallet);
+    this.tradeExecutor = new TradeExecutor(
+      this.router,
+      wallet,
+      this.logger,
+      this.metrics
+    );
   }
 
   /**
@@ -297,7 +235,7 @@ export class CycleArbitrage {
     // Fetch pool addresses for all cycles
     this.logger.info('Fetching pool addresses...');
     for (const [cycleId, cycle] of this.cycles.entries()) {
-      const tokensPath = this.formatCyclePath(cycle.tokens);
+      const tokensPath = this.formatter.formatCyclePath(cycle.tokens);
       this.logger.info(`Cycle: ${tokensPath} (${cycleId})`);
       cycle.poolAddresses = [];
 
@@ -377,147 +315,50 @@ export class CycleArbitrage {
     const cycle = this.cycles.get(cycleId);
     if (!cycle) return;
 
-    let scanCount = 0;
-    let currentAmountIn = this.options.amountIn;
-    let optimalAmountIn = this.options.amountIn;
-    let optimalArbBps = 0;
+    const scanner = new CycleScanner(
+      cycleId,
+      cycle,
+      this.quoter,
+      this.stateFetcher,
+      (cid: string, amountIn: bigint) => this.estimateAmountOutForCycle(cid, amountIn),
+      {
+        minArbitrageBps: this.options.minArbitrageBps,
+        scanIntervalMs: this.options.scanIntervalMs,
+        amountIn: this.options.amountIn,
+        optimizeAmountIn: this.options.optimizeAmountIn,
+        optimizationInterval: this.options.optimizationInterval,
+        optimizationPrecision: this.options.optimizationPrecision,
+      },
+      this.amountOptimizer,
+      this.metrics,
+      this.logger,
+      this.formatter,
+      async (result) => {
+        // Handle opportunity - execute if wallet/router is set
+        if (this.tradeExecutor) {
+          const executeAmount =
+            this.options.optimizeAmountIn &&
+              result.optimalArbBps &&
+              result.optimalArbBps > result.arbitrageBps
+              ? result.optimalAmountIn!
+              : result.amountIn;
 
-    // Use cycle-specific min/max amounts (already set in constructor)
-    const minAmountIn = cycle.minAmountIn;
-    const maxAmountIn = cycle.maxAmountIn;
-
-    // Initial optimization if enabled
-    if (this.options.optimizeAmountIn && this.amountOptimizer) {
-      this.logger.info(
-        `[${cycleId}] Finding optimal amountIn (range: ${ethers.formatEther(minAmountIn)} - ${ethers.formatEther(maxAmountIn)})...`
-      );
-      try {
-        const optimal = await this.amountOptimizer.findOptimalAmountIn(
-          cycleId,
-          minAmountIn,
-          maxAmountIn,
-          this.options.optimizationPrecision
-        );
-        optimalAmountIn = optimal.amountIn;
-        optimalArbBps = optimal.arbitrageBps;
-        currentAmountIn = optimalAmountIn;
-        
-        // Record optimization result (best amountIn)
-        this.metrics.recordOptimizationResult(cycleId, optimalAmountIn, optimalArbBps);
-        
-        this.logger.info(
-          `[${cycleId}] Optimal: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
-          `arb: ${optimalArbBps.toFixed(2)} bps`
-        );
-      } catch (error) {
-        this.logger.error(`[${cycleId}] Optimization failed:`, error);
-        this.logger.info(`[${cycleId}] Using default amountIn: ${ethers.formatEther(this.options.amountIn)}`);
-      }
-    }
-
-    while (true) {
-      try {
-        // Record scan
-        this.metrics.recordScan(cycleId);
-
-        // Re-optimize periodically if enabled
-        if (
-          this.options.optimizeAmountIn &&
-          this.amountOptimizer &&
-          scanCount > 0 &&
-          scanCount % this.options.optimizationInterval === 0
-        ) {
-          try {
-            const optimal = await this.amountOptimizer.findOptimalAmountIn(
-              cycleId,
-              minAmountIn,
-              maxAmountIn,
-              this.options.optimizationPrecision
-            );
-            if (optimal.arbitrageBps > optimalArbBps) {
-              optimalAmountIn = optimal.amountIn;
-              optimalArbBps = optimal.arbitrageBps;
-              currentAmountIn = optimalAmountIn;
-              
-              // Record optimization result (best amountIn)
-              this.metrics.recordOptimizationResult(cycleId, optimalAmountIn, optimalArbBps);
-              
-              this.logger.info(
-                `[${cycleId}] Re-optimized: ${ethers.formatEther(optimalAmountIn)} tokens, ` +
-                `arb: ${optimalArbBps.toFixed(2)} bps`
-              );
-            }
-          } catch (error) {
-            this.logger.error(`[${cycleId}] Re-optimization failed:`, error);
-          }
-        }
-
-        const amountOut = await this.estimateAmountOutForCycle(
-          cycleId,
-          currentAmountIn
-        );
-
-        // Calculate arbitrage in bps
-        const arbitrageBps = Number(
-          ((amountOut - currentAmountIn) * BigInt(1e4)) /
-          currentAmountIn
-        );
-
-        scanCount++;
-
-        // Record arbitrage BPS for historical chart (every 1000 scans)
-        if (scanCount % 1000 === 0) {
-          this.metrics.recordArbitrageBps(cycleId, arbitrageBps);
-        }
-
-        if (arbitrageBps > this.options.minArbitrageBps) {
-          // Record opportunity với amountIn
-          this.metrics.recordOpportunity(cycleId, arbitrageBps, currentAmountIn);
-
-          const timestamp = new Date().toISOString();
-          this.logger.info('🎯 Arbitrage detected!', {
-            cycle: cycle.tokens.join(' -> '),
+          const executeAmountOut = await this.estimateAmountOutForCycle(
             cycleId,
-            arbitrageBps: arbitrageBps.toFixed(2),
-            amountIn: ethers.formatEther(currentAmountIn),
-            amountOut: ethers.formatEther(amountOut),
-            profit: ethers.formatEther(amountOut - currentAmountIn),
-            optimalAmount: this.options.optimizeAmountIn ? ethers.formatEther(optimalAmountIn) : undefined,
-            optimalArbBps: this.options.optimizeAmountIn ? optimalArbBps.toFixed(2) : undefined,
-            timestamp,
-          });
+            executeAmount
+          );
 
-          // Execute if wallet/router is set
-          if (this.wallet && this.router) {
-            // Use optimal amount if available and better
-            const executeAmount =
-              this.options.optimizeAmountIn && optimalArbBps > arbitrageBps
-                ? optimalAmountIn
-                : currentAmountIn;
-
-            const executeAmountOut = await this.estimateAmountOutForCycle(
-              cycleId,
-              executeAmount
-            );
-
-            await this.executeCycle(cycleId, executeAmount, executeAmountOut);
-          }
-        } else if (scanCount % 1000 === 0) {
-          this.logger.info(
-            `[${cycleId}] Scanning... ` +
-            `(arb: ${arbitrageBps.toFixed(2)} bps, amount: ${ethers.formatEther(currentAmountIn)}, scans: ${scanCount})`
+          await this.tradeExecutor.executeCycle(
+            cycleId,
+            cycle,
+            executeAmount,
+            executeAmountOut
           );
         }
-
-        await this.sleep(this.options.scanIntervalMs);
-      } catch (error) {
-        this.logger.error(
-          `[${cycleId}] Scan error:`,
-          error
-        );
-        await this.sleep(5000);
       }
-    }
+    );
+
+    await scanner.start();
   }
 
   /**
@@ -539,76 +380,6 @@ export class CycleArbitrage {
     await Promise.all(scanTasks);
   }
 
-  /**
-   * Execute arbitrage trade for a specific cycle
-   */
-  private async executeCycle(
-    cycleId: string,
-    amountIn: bigint,
-    estimatedOut: bigint
-  ): Promise<void> {
-    const cycle = this.cycles.get(cycleId);
-    if (!cycle || !this.wallet || !this.router) {
-      return;
-    }
-
-    try {
-      // Apply slippage (10 bps)
-      const minAmountOut = (estimatedOut * BigInt(9990)) / BigInt(10000);
-
-      // Encode swap path
-      const path = this.encodeSwapPath(cycle.addresses, cycle.fees);
-
-      this.logger.info(`[${cycleId}] Executing swap...`);
-
-      // Execute swap
-      const tx = await this.router.swapExactInput({
-        path,
-        recipient: this.wallet.address,
-        deadline: Math.floor(Date.now() / 1000) + 60, // 60 seconds
-        amountIn,
-        amountOutMinimum: minAmountOut,
-      });
-
-      this.logger.info(`[${cycleId}] TX hash: ${tx.hash}`);
-      const receipt = await tx.wait();
-      this.logger.info(`[${cycleId}] ✓ Swap confirmed: ${receipt.hash}`);
-
-      // Analyze result
-      const profit = await this.analyze(receipt, amountIn);
-
-      // Record execution
-      if (profit !== null) {
-        this.metrics.recordExecution(cycleId, profit);
-      }
-    } catch (error: any) {
-      this.logger.error(`[${cycleId}] ✗ Execution failed:`, error.message || error);
-    }
-  }
-
-  /**
-   * Analyze trade result
-   * Returns profit amount (bigint) or null if parsing failed
-   */
-  private async analyze(receipt: any, amountIn: bigint): Promise<bigint | null> {
-    try {
-      // Parse Swap events from receipt
-      const actualOut = await this.parseReceiptAmounts(receipt);
-      const profit = actualOut - amountIn;
-      const profitBps = Number((profit * BigInt(1e4)) / amountIn);
-
-      this.logger.info('Trade Analysis:', {
-        profitBps: profitBps.toFixed(2),
-        actualOut: ethers.formatEther(actualOut),
-        actualProfit: ethers.formatEther(profit),
-      });
-
-      return profit;
-    } catch (error) {
-      this.logger.error('⚠ Could not parse receipt:', error);
-      return null;
-    }
-  }
 
   /**
    * Get pool address from factory
@@ -632,68 +403,6 @@ export class CycleArbitrage {
     return poolAddress;
   }
 
-  /**
-   * Encode V3 swap path: token0 (20 bytes) + fee (3 bytes) + token1 (20 bytes) ...
-   */
-  private encodeSwapPath(addresses: string[], fees: number[]): string {
-    if (addresses.length < 2 || fees.length !== addresses.length - 1) {
-      throw new Error('Invalid path: addresses and fees mismatch');
-    }
 
-    let path = '0x';
-    for (let i = 0; i < fees.length; i++) {
-      // Address (20 bytes, remove 0x)
-      path += addresses[i].slice(2).toLowerCase();
-      // Fee (3 bytes, big-endian, hex)
-      path += fees[i].toString(16).padStart(6, '0');
-    }
-    // Last address
-    path += addresses[addresses.length - 1].slice(2).toLowerCase();
-
-    return path;
-  }
-
-  /**
-   * Parse receipt to get actual output amount
-   * Simplified version - gets last swap event's amountOut
-   */
-  private async parseReceiptAmounts(receipt: any): Promise<bigint> {
-    // Find Swap events
-    const swapLogs = receipt.logs.filter(
-      (log: any) => log.topics[0] === CONSTANTS.SWAP_EVENT_TOPIC
-    );
-
-    if (swapLogs.length === 0) {
-      throw new Error('No Swap events found in receipt');
-    }
-
-    // Get the last swap (final output)
-    const lastSwap = swapLogs[swapLogs.length - 1];
-
-    // Decode the data field
-    // Swap event data: amount0, amount1, sqrtPriceX96, liquidity, tick, fee0, fee1
-    const poolInterface = new ethers.Interface(CONSTANTS.POOL_SWAP_ABI);
-    const decoded = poolInterface.parseLog({
-      topics: lastSwap.topics,
-      data: lastSwap.data,
-    });
-
-    if (!decoded) {
-      throw new Error('Could not decode swap event');
-    }
-
-    // Get the output amount (positive value)
-    const amount0 = decoded.args[2] as bigint;
-    const amount1 = decoded.args[3] as bigint;
-
-    // Output is the positive amount
-    const actualOut = amount0 > 0n ? amount0 : amount1;
-
-    return actualOut > 0n ? actualOut : -actualOut; // Ensure positive
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
 }
 
