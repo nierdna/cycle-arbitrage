@@ -11,7 +11,7 @@
 
 import 'dotenv/config';
 import { ethers } from 'ethers';
-import { CycleArbitrage } from '../src/cycleArbitrage.js';
+import { CycleArbitrage, TokenAmountConfig } from '../src/cycleArbitrage.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
 
 // Token addresses on BSC (from execution/web3pro/const.py)
@@ -47,6 +47,17 @@ async function main() {
     tokenNames.set(address.toLowerCase(), name);
   });
 
+  // Create token amount config (minAmountIn/maxAmountIn per start token)
+  const tokenAmountConfig = new Map<string, TokenAmountConfig>();
+  tokenAmountConfig.set(TOKENS.USDT.toLowerCase(), {
+    minAmountIn: BigInt(1e10), // 0.0001 USDT
+    maxAmountIn: BigInt(1e19), // 10 USDT
+  });
+  tokenAmountConfig.set(TOKENS.WBNB.toLowerCase(), {
+    minAmountIn: BigInt(1e15), // 0.001 WBNB
+    maxAmountIn: BigInt(1e20), // 100 WBNB
+  });
+
   // Create arbitrage instance with auto-discovery mode
   const arbitrage = new CycleArbitrage(provider, tokenList, {
     minArbitrageBps: 2, // Minimum 2 bps profit
@@ -63,6 +74,7 @@ async function main() {
     dashboardPort: 8080, // Enable HTTP dashboard on port 8080
     discoveryFees: [100, 500, 2500, 10000],
     tokenNames, // Token name mapping for readable logs
+    tokenAmountConfig, // Amount config per start token
   });
 
   // Optional: Set execution (if you want to auto-execute)
