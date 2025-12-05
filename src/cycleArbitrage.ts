@@ -11,6 +11,8 @@ import * as CONSTANTS from './constants.js';
 import { AmountOptimizer } from './optimization/amountOptimizer.js';
 import { MetricsCollector } from './monitoring/metrics.js';
 import { DashboardServer } from './monitoring/dashboard.js';
+import { PoolMatrixBuilder } from './poolMatrix/poolMatrixBuilder.js';
+import { PathFinder } from './poolMatrix/pathFinder.js';
 
 export interface CycleConfig {
   tokens: string[]; // ["USDT", "WBNB", "USDT"]
@@ -21,10 +23,6 @@ export interface CycleConfig {
   maxAmountIn?: bigint; // Maximum amount to search for this cycle
 }
 
-export interface CycleCluster {
-  cycles: CycleConfig[];
-  name?: string;
-}
 
 interface CycleWithState extends CycleConfig {
   poolAddresses: string[];
@@ -47,10 +45,13 @@ export interface ArbitrageOptions {
   logDir?: string; // Log directory path (default: 'log')
   dashboardPort?: number; // HTTP dashboard port (default: undefined, disabled)
   historyDir?: string; // History data directory path (default: 'data/history')
+  maxHops?: number; // Maximum hops for cycle discovery (default: 3)
+  discoveryFees?: number[]; // Fees to try during discovery (default: [100, 500, 2500, 10000])
+  tokenNames?: Map<string, string>; // Optional: Map token address -> token name for logging
 }
 
 /**
- * Cycle Arbitrage - Support Cycle Clusters
+ * Cycle Arbitrage - Auto-Discovery Mode
  */
 export class CycleArbitrage {
   private provider: ethers.Provider;
@@ -63,9 +64,13 @@ export class CycleArbitrage {
   private amountOptimizer?: AmountOptimizer;
   private metrics: MetricsCollector;
   private dashboard?: DashboardServer;
+  private poolMatrixBuilder: PoolMatrixBuilder;
+  private pathFinder: PathFinder;
+  private tokenList: string[];
+  private tokenNames: Map<string, string>; // Map token address -> token name
 
   private cycles: Map<string, CycleWithState> = new Map();
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir'>> & {
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees' | 'tokenNames'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
     minAmountIn: bigint;
@@ -75,14 +80,19 @@ export class CycleArbitrage {
     logDir: string;
     historyDir: string;
     dashboardPort?: number;
+    maxHops: number;
+    discoveryFees: number[];
+    tokenNames?: Map<string, string>;
   };
 
   constructor(
     provider: ethers.Provider,
-    clusters: CycleCluster[],
+    tokenList: string[],
     options: ArbitrageOptions = {}
   ) {
     this.provider = provider;
+    this.tokenList = tokenList;
+    this.tokenNames = options.tokenNames ?? new Map();
     this.options = {
       minArbitrageBps: options.minArbitrageBps ?? 2,
       scanIntervalMs: options.scanIntervalMs ?? 10,
@@ -95,6 +105,9 @@ export class CycleArbitrage {
       optimizationPrecision: options.optimizationPrecision ?? BigInt(1e15), // 0.001 tokens
       logDir: options.logDir ?? 'log',
       historyDir: options.historyDir ?? 'data/history',
+      maxHops: options.maxHops ?? 3,
+      discoveryFees: options.discoveryFees ?? [100, 500, 2500, 10000],
+      tokenNames: options.tokenNames,
     };
 
     // Initialize logger
@@ -110,24 +123,10 @@ export class CycleArbitrage {
       this.logger.info(`Dashboard started on port ${options.dashboardPort}`);
     }
 
-    // Initialize cycles from clusters
-    // Use global defaults from options (already set above)
-    const globalMinAmountIn = this.options.minAmountIn;
-    const globalMaxAmountIn = this.options.maxAmountIn;
-
-    for (const cluster of clusters) {
-      for (const cycle of cluster.cycles) {
-        const cycleId = this.getCycleId(cycle);
-        this.cycles.set(cycleId, {
-          ...cycle,
-          poolAddresses: [],
-          cycleId,
-          // Use cycle-specific config if provided, otherwise use global defaults
-          minAmountIn: cycle.minAmountIn ?? globalMinAmountIn,
-          maxAmountIn: cycle.maxAmountIn ?? globalMaxAmountIn,
-        });
-      }
-    }
+    // Initialize pool matrix builder and path finder
+    this.factory = new ethers.Contract(CONSTANTS.PANCAKE_V3_FACTORY, CONSTANTS.FACTORY_ABI, this.provider);
+    this.poolMatrixBuilder = new PoolMatrixBuilder(provider);
+    this.pathFinder = new PathFinder();
 
     // Initialize StateFetcher with WebSocket
     this.stateFetcher = new StateFetcher(
@@ -142,7 +141,6 @@ export class CycleArbitrage {
     );
 
     this.quoter = new QuoterV3(this.stateFetcher);
-    this.factory = new ethers.Contract(CONSTANTS.PANCAKE_V3_FACTORY, CONSTANTS.FACTORY_ABI, this.provider);
 
     // Initialize AmountOptimizer if optimization is enabled
     if (this.options.optimizeAmountIn) {
@@ -150,6 +148,82 @@ export class CycleArbitrage {
         (cycleId: string, amountIn: bigint) => this.calculateArbitrageBps(cycleId, amountIn)
       );
     }
+  }
+
+  /**
+   * Discover cycles automatically from token list
+   * Builds pool matrix and finds all valid cycles
+   */
+  async discoverCycles(): Promise<CycleConfig[]> {
+    this.logger.info('=== Auto-Discovery Mode ===');
+    this.logger.info(`Token list: ${this.tokenList.length} tokens`);
+    this.logger.info(`Max hops: ${this.options.maxHops}`);
+    this.logger.info(`Discovery fees: ${this.options.discoveryFees.join(', ')} bps`);
+
+    // Build pool matrix
+    this.logger.info('Building pool matrix...');
+    const matrix = await this.poolMatrixBuilder.buildPoolMatrix(
+      this.tokenList,
+      this.options.discoveryFees
+    );
+    this.logger.info(`Found ${matrix.pools.size} token pairs with pools`);
+
+    // Find all cycles for each token
+    this.logger.info('Discovering cycles...');
+    const allCycles: CycleConfig[] = [];
+    const seenCycles = new Set<string>();
+
+    for (const token of this.tokenList) {
+      const cycles = this.pathFinder.findAllCycles(matrix, token, this.options.maxHops);
+
+      for (const candidate of cycles) {
+        // Validate cycle
+        if (!this.pathFinder.validateCycle(candidate, matrix)) {
+          continue;
+        }
+
+        // Deduplicate
+        const cycleKey = `${candidate.tokens.join('-')}-${candidate.fees.join('-')}`;
+        if (seenCycles.has(cycleKey)) {
+          continue;
+        }
+        seenCycles.add(cycleKey);
+
+        // Convert to CycleConfig
+        allCycles.push({
+          tokens: candidate.tokens,
+          addresses: candidate.addresses,
+          fees: candidate.fees,
+        });
+      }
+    }
+
+    this.logger.info(`Discovered ${allCycles.length} valid cycles`);
+
+    // Log cycles with readable format
+    for (let i = 0; i < allCycles.length; i++) {
+      const cycle = allCycles[i];
+      const tokensPath = this.formatCyclePath(cycle.tokens);
+      const feesStr = cycle.fees.join(', ');
+      this.logger.info(`  [${i + 1}] ${tokensPath} | fees: [${feesStr}] bps`);
+    }
+
+    // Register cycles for monitoring
+    const globalMinAmountIn = this.options.minAmountIn;
+    const globalMaxAmountIn = this.options.maxAmountIn;
+
+    for (const cycle of allCycles) {
+      const cycleId = this.getCycleId(cycle);
+      this.cycles.set(cycleId, {
+        ...cycle,
+        poolAddresses: [],
+        cycleId,
+        minAmountIn: cycle.minAmountIn ?? globalMinAmountIn,
+        maxAmountIn: cycle.maxAmountIn ?? globalMaxAmountIn,
+      });
+    }
+
+    return allCycles;
   }
 
   /**
@@ -174,6 +248,19 @@ export class CycleArbitrage {
   }
 
   /**
+   * Format cycle path with token names if available
+   * Example: "USDT -> WBNB -> USDT" or "0x123... -> 0x456... -> 0x123..."
+   */
+  private formatCyclePath(tokens: string[]): string {
+    return tokens
+      .map((token) => {
+        const name = this.tokenNames.get(token.toLowerCase());
+        return name || `${token.slice(0, 6)}...${token.slice(-4)}`;
+      })
+      .join(' -> ');
+  }
+
+  /**
    * Set wallet and router for execution (optional - for execution mode)
    */
   setExecution(wallet: ethers.Wallet): void {
@@ -182,16 +269,23 @@ export class CycleArbitrage {
   }
 
   /**
-   * Initialize: Fetch pool addresses and subscribe to WebSocket
+   * Initialize: Discover cycles, fetch pool addresses and subscribe to WebSocket
    */
   async initialize(): Promise<void> {
     this.logger.info('=== Cycle Arbitrage ===');
+
+    // Discover cycles if not already discovered
+    if (this.cycles.size === 0) {
+      await this.discoverCycles();
+    }
+
     this.logger.info(`Total cycles: ${this.cycles.size}`);
 
     // Fetch pool addresses for all cycles
     this.logger.info('Fetching pool addresses...');
     for (const [cycleId, cycle] of this.cycles.entries()) {
-      this.logger.info(`Cycle: ${cycle.tokens.join(' -> ')} (${cycleId})`);
+      const tokensPath = this.formatCyclePath(cycle.tokens);
+      this.logger.info(`Cycle: ${tokensPath} (${cycleId})`);
       cycle.poolAddresses = [];
 
       for (let i = 0; i < cycle.tokens.length - 1; i++) {

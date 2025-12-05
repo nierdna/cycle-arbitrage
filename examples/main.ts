@@ -31,67 +31,24 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   console.log(`RPC: ${rpcUrl}\n`);
 
-  // Define cycle clusters
-  const clusters = [
-    {
-      cycles: [
-        {
-          tokens: ['USDT', 'WBNB', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
-          fees: [500, 100], // 0.05%, 0.01%
-          // Per-cycle optimization range (overrides global defaults)
-          minAmountIn: BigInt(1e10), // 0.0001 USDT
-          maxAmountIn: BigInt(1e19), // 10 USDT
-        },
-        {
-          tokens: ['USDT', 'WBNB', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.WBNB, TOKENS.USDT],
-          fees: [100, 500], // 0.01%, 0.05%
-          // This cycle will use global defaults if not specified
-          minAmountIn: BigInt(1e10), // 0.0001 USDT
-          maxAmountIn: BigInt(1e19), // 10 USDT
-        },
-      ],
-      name: 'USDT-WBNB cluster',
-    },
-    {
-      cycles: [
-        {
-          tokens: ['USDT', 'ASTER', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
-          fees: [500, 2500], // 0.05%, 0.25%
-        },
-        {
-          tokens: ['USDT', 'ASTER', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.ASTER, TOKENS.USDT],
-          fees: [2500, 500], // 0.25%, 0.05%
-        },
-      ],
-      name: 'USDT-ASTER cluster',
-    },
-    {
-      cycles: [
-        {
-          tokens: ['USDT', 'KOGE', 'ETH', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.KOGE, TOKENS.ETH, TOKENS.USDT],
-          fees: [100, 10000, 500], // 0.01%, 1%, 0.05%,
-          minAmountIn: BigInt(1e16),
-          maxAmountIn: BigInt(1e20),
-        },
-        {
-          tokens: ['USDT', 'ETH', 'KOGE', 'USDT'],
-          addresses: [TOKENS.USDT, TOKENS.ETH, TOKENS.KOGE, TOKENS.USDT],
-          fees: [500, 10000, 100], // 0.01%, 1%, 0.05%,
-          minAmountIn: BigInt(1e16),
-          maxAmountIn: BigInt(1e20),
-        },
-      ],
-      name: 'KOGE-ETH-USDT-KOGE cluster',
-    },
+  // Define token list for auto-discovery
+  // System will automatically find all cycles between these tokens
+  const tokenList = [
+    TOKENS.USDT,
+    TOKENS.WBNB,
+  // TOKENS.ASTER,
+  // TOKENS.ETH,
+  // TOKENS.KOGE,
   ];
 
-  // Create arbitrage instance
-  const arbitrage = new CycleArbitrage(provider, clusters, {
+  // Create token name mapping for readable logs
+  const tokenNames = new Map<string, string>();
+  Object.entries(TOKENS).forEach(([name, address]) => {
+    tokenNames.set(address.toLowerCase(), name);
+  });
+
+  // Create arbitrage instance with auto-discovery mode
+  const arbitrage = new CycleArbitrage(provider, tokenList, {
     minArbitrageBps: 2, // Minimum 2 bps profit
     scanIntervalMs: 1, // Scan every 1ms
     wssUrl: process.env.BSC_WSS_URL, // Optional: for real-time updates
@@ -104,6 +61,8 @@ async function main() {
     optimizationInterval: 100, // Re-optimize every 100 scans
     optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
     dashboardPort: 8080, // Enable HTTP dashboard on port 8080
+    discoveryFees: [100, 500, 2500, 10000],
+    tokenNames, // Token name mapping for readable logs
   });
 
   // Optional: Set execution (if you want to auto-execute)
