@@ -67,7 +67,6 @@ export class CycleArbitrage {
   private stateFetcher: StateFetcher;
   private quoter: QuoterV3;
   private factory: ethers.Contract;
-  private wallet?: ethers.Wallet;
   private router?: ethers.Contract;
   private logger: winston.Logger;
   private amountOptimizer?: AmountOptimizer;
@@ -209,7 +208,6 @@ export class CycleArbitrage {
    * Set wallet and router for execution (optional - for execution mode)
    */
   setExecution(wallet: ethers.Wallet): void {
-    this.wallet = wallet; // Store for potential future use
     this.router = new ethers.Contract(CONSTANTS.BITSWAP_V3_ROUTER, CONSTANTS.ROUTER_ABI, wallet);
     this.tradeExecutor = new TradeExecutor(
       this.router,
@@ -318,8 +316,6 @@ export class CycleArbitrage {
     const scanner = new CycleScanner(
       cycleId,
       cycle,
-      this.quoter,
-      this.stateFetcher,
       (cid: string, amountIn: bigint) => this.estimateAmountOutForCycle(cid, amountIn),
       {
         minArbitrageBps: this.options.minArbitrageBps,

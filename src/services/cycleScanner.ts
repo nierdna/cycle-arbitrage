@@ -4,7 +4,6 @@
  */
 
 import { ethers } from 'ethers';
-import { QuoterV3, StateFetcher } from 'uniswap-v3-quoter';
 import winston from 'winston';
 import { AmountOptimizer } from '../optimization/amountOptimizer.js';
 import { MetricsCollector } from '../monitoring/metrics.js';
@@ -37,8 +36,6 @@ export class CycleScanner {
   constructor(
     private cycleId: string,
     private cycle: CycleWithState,
-    private quoter: QuoterV3,
-    private stateFetcher: StateFetcher,
     private estimateAmountOut: (cycleId: string, amountIn: bigint) => Promise<bigint>,
     private options: ScanOptions,
     private amountOptimizer?: AmountOptimizer,
