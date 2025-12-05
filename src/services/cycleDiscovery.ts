@@ -109,10 +109,18 @@ export class CycleDiscoveryService {
   }
 
   /**
-   * Generate unique ID for cycle
+   * Generate unique ID for cycle using token names
    */
   getCycleId(cycle: CycleConfig): string {
-    return `${cycle.tokens.join('-')}-${cycle.fees.join('-')}`;
+    // Convert token addresses to names
+    const tokenNames = cycle.addresses.map((address) => {
+      const token = this.tokenRegistry.getToken(address.toLowerCase());
+      if (!token?.name) {
+        throw new Error(`Token ${address} does not have a name in TokenRegistry`);
+      }
+      return token.name;
+    });
+    return `${tokenNames.join('-')}-${cycle.fees.join('-')}`;
   }
 
   /**
