@@ -13,6 +13,7 @@ import { MetricsCollector } from './monitoring/metrics.js';
 import { DashboardServer } from './monitoring/dashboard.js';
 import { PoolMatrixBuilder } from './poolMatrix/poolMatrixBuilder.js';
 import { PathFinder } from './poolMatrix/pathFinder.js';
+import { TokenRegistry } from './tokens/tokenRegistry.js';
 
 export interface TokenAmountConfig {
   minAmountIn: bigint;
@@ -43,8 +44,6 @@ export interface ArbitrageOptions {
   wssUrl?: string;
   amountIn?: bigint; // Default amount to test with
   optimizeAmountIn?: boolean; // Enable amountIn optimization
-  minAmountIn?: bigint; // Minimum amount to search (default: 0.1 tokens)
-  maxAmountIn?: bigint; // Maximum amount to search (default: 100 tokens)
   optimizationInterval?: number; // Re-optimize every N scans (default: 100)
   optimizationPrecision?: bigint; // Precision for ternary search (default: 0.001 tokens)
   logDir?: string; // Log directory path (default: 'log')
@@ -52,8 +51,6 @@ export interface ArbitrageOptions {
   historyDir?: string; // History data directory path (default: 'data/history')
   maxHops?: number; // Maximum hops for cycle discovery (default: 3)
   discoveryFees?: number[]; // Fees to try during discovery (default: [100, 500, 2500, 10000])
-  tokenNames?: Map<string, string>; // Optional: Map token address -> token name for logging
-  tokenAmountConfig?: Map<string, TokenAmountConfig>; // Optional: Map start token address -> amount config
 }
 
 /**
@@ -72,16 +69,12 @@ export class CycleArbitrage {
   private dashboard?: DashboardServer;
   private poolMatrixBuilder: PoolMatrixBuilder;
   private pathFinder: PathFinder;
-  private tokenList: string[];
-  private tokenNames: Map<string, string>; // Map token address -> token name
-  private tokenAmountConfig?: Map<string, TokenAmountConfig>; // Map start token address -> amount config
+  private tokenRegistry: TokenRegistry;
 
   private cycles: Map<string, CycleWithState> = new Map();
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'minAmountIn' | 'maxAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees' | 'tokenNames' | 'tokenAmountConfig'>> & {
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
-    minAmountIn: bigint;
-    maxAmountIn: bigint;
     optimizationInterval: number;
     optimizationPrecision: bigint;
     logDir: string;
@@ -89,35 +82,27 @@ export class CycleArbitrage {
     dashboardPort?: number;
     maxHops: number;
     discoveryFees: number[];
-    tokenNames?: Map<string, string>;
-    tokenAmountConfig?: Map<string, TokenAmountConfig>;
   };
 
   constructor(
     provider: ethers.Provider,
-    tokenList: string[],
+    tokenRegistry: TokenRegistry,
     options: ArbitrageOptions = {}
   ) {
     this.provider = provider;
-    this.tokenList = tokenList;
-    this.tokenNames = options.tokenNames ?? new Map();
-    this.tokenAmountConfig = options.tokenAmountConfig;
+    this.tokenRegistry = tokenRegistry;
     this.options = {
       minArbitrageBps: options.minArbitrageBps ?? 2,
       scanIntervalMs: options.scanIntervalMs ?? 10,
       amountIn: options.amountIn ?? BigInt(1e18), // 1 token (18 decimals)
       wssUrl: options.wssUrl,
       optimizeAmountIn: options.optimizeAmountIn ?? false,
-      minAmountIn: options.minAmountIn ?? BigInt(1e17), // 0.1 tokens
-      maxAmountIn: options.maxAmountIn ?? BigInt(1e20), // 100 tokens
       optimizationInterval: options.optimizationInterval ?? 100,
       optimizationPrecision: options.optimizationPrecision ?? BigInt(1e15), // 0.001 tokens
       logDir: options.logDir ?? 'log',
       historyDir: options.historyDir ?? 'data/history',
       maxHops: options.maxHops ?? 3,
       discoveryFees: options.discoveryFees ?? [100, 500, 2500, 10000],
-      tokenNames: options.tokenNames,
-      tokenAmountConfig: options.tokenAmountConfig,
     };
 
     // Initialize logger
@@ -166,14 +151,15 @@ export class CycleArbitrage {
    */
   async discoverCycles(): Promise<CycleConfig[]> {
     this.logger.info('=== Auto-Discovery Mode ===');
-    this.logger.info(`Token list: ${this.tokenList.length} tokens`);
+    const tokenAddresses = this.tokenRegistry.getAllAddresses();
+    this.logger.info(`Token list: ${this.tokenRegistry.size} tokens`);
     this.logger.info(`Max hops: ${this.options.maxHops}`);
     this.logger.info(`Discovery fees: ${this.options.discoveryFees.join(', ')} bps`);
 
     // Build pool matrix
     this.logger.info('Building pool matrix...');
     const matrix = await this.poolMatrixBuilder.buildPoolMatrix(
-      this.tokenList,
+      tokenAddresses,
       this.options.discoveryFees
     );
     this.logger.info(`Found ${matrix.pools.size} token pairs with pools`);
@@ -183,8 +169,8 @@ export class CycleArbitrage {
     const allCycles: CycleConfig[] = [];
     const seenCycles = new Set<string>();
 
-    for (const token of this.tokenList) {
-      const cycles = this.pathFinder.findAllCycles(matrix, token, this.options.maxHops);
+    for (const tokenAddress of tokenAddresses) {
+      const cycles = this.pathFinder.findAllCycles(matrix, tokenAddress, this.options.maxHops);
 
       for (const candidate of cycles) {
         // Validate cycle
@@ -219,29 +205,27 @@ export class CycleArbitrage {
     }
 
     // Register cycles for monitoring
-    const globalMinAmountIn = this.options.minAmountIn;
-    const globalMaxAmountIn = this.options.maxAmountIn;
-
     for (const cycle of allCycles) {
       const cycleId = this.getCycleId(cycle);
-      const startToken = cycle.addresses[0].toLowerCase(); // Start token (first token in cycle)
+      const startTokenAddress = cycle.addresses[0].toLowerCase(); // Start token (first token in cycle)
 
-      // Priority: cycle.minAmountIn > tokenAmountConfig[startToken] > globalMinAmountIn
+      // Priority: cycle.minAmountIn > tokenRegistry.getTokenAmountConfig(startToken)
       let minAmountIn = cycle.minAmountIn;
       let maxAmountIn = cycle.maxAmountIn;
 
-      // If cycle doesn't specify, try tokenAmountConfig
+      // If cycle doesn't specify, get from tokenRegistry (required)
       if (!minAmountIn || !maxAmountIn) {
-        const tokenConfig = this.tokenAmountConfig?.get(startToken);
-        if (tokenConfig) {
-          minAmountIn = minAmountIn ?? tokenConfig.minAmountIn;
-          maxAmountIn = maxAmountIn ?? tokenConfig.maxAmountIn;
+        const token = this.tokenRegistry.getToken(startTokenAddress);
+        if (!token?.amountConfig) {
+          this.logger.warn(
+            `Token ${startTokenAddress} does not have amountConfig. ` +
+            `Cycle ${cycleId} will be skipped. Please add amountConfig to token in TokenRegistry.`
+          );
+          continue; // Skip cycles without amount config
         }
+        minAmountIn = minAmountIn ?? token.amountConfig.minAmountIn;
+        maxAmountIn = maxAmountIn ?? token.amountConfig.maxAmountIn;
       }
-
-      // Fallback to global defaults
-      minAmountIn = minAmountIn ?? globalMinAmountIn;
-      maxAmountIn = maxAmountIn ?? globalMaxAmountIn;
 
       this.cycles.set(cycleId, {
         ...cycle,
@@ -282,9 +266,9 @@ export class CycleArbitrage {
    */
   private formatCyclePath(tokens: string[]): string {
     return tokens
-      .map((token) => {
-        const name = this.tokenNames.get(token.toLowerCase());
-        return name || `${token.slice(0, 6)}...${token.slice(-4)}`;
+      .map((tokenAddress) => {
+        const token = this.tokenRegistry.getToken(tokenAddress);
+        return token?.displayName || `${tokenAddress.slice(0, 6)}...${tokenAddress.slice(-4)}`;
       })
       .join(' -> ');
   }

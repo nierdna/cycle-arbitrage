@@ -11,7 +11,8 @@
 
 import 'dotenv/config';
 import { ethers } from 'ethers';
-import { CycleArbitrage, TokenAmountConfig } from '../src/cycleArbitrage.js';
+import { CycleArbitrage } from '../src/cycleArbitrage.js';
+import { Token, TokenRegistry } from '../src/tokens/index.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
 
 // Token addresses on BSC (from execution/web3pro/const.py)
@@ -31,50 +32,46 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   console.log(`RPC: ${rpcUrl}\n`);
 
-  // Define token list for auto-discovery
-  // System will automatically find all cycles between these tokens
-  const tokenList = [
+  // Create token registry with tokens and their configs
+  const tokenRegistry = new TokenRegistry();
+
+  // Add tokens with name and amount config
+  tokenRegistry.addToken(new Token(
     TOKENS.USDT,
+    'USDT',
+    {
+      minAmountIn: BigInt(1e10), // 0.0001 USDT
+      maxAmountIn: BigInt(1e19), // 10 USDT
+    }
+  ));
+
+  tokenRegistry.addToken(new Token(
     TOKENS.WBNB,
-  // TOKENS.ASTER,
-  // TOKENS.ETH,
-  // TOKENS.KOGE,
-  ];
+    'WBNB',
+    {
+      minAmountIn: BigInt(1e15), // 0.001 WBNB
+      maxAmountIn: BigInt(1e20), // 100 WBNB
+    }
+  ));
 
-  // Create token name mapping for readable logs
-  const tokenNames = new Map<string, string>();
-  Object.entries(TOKENS).forEach(([name, address]) => {
-    tokenNames.set(address.toLowerCase(), name);
-  });
-
-  // Create token amount config (minAmountIn/maxAmountIn per start token)
-  const tokenAmountConfig = new Map<string, TokenAmountConfig>();
-  tokenAmountConfig.set(TOKENS.USDT.toLowerCase(), {
-    minAmountIn: BigInt(1e10), // 0.0001 USDT
-    maxAmountIn: BigInt(1e19), // 10 USDT
-  });
-  tokenAmountConfig.set(TOKENS.WBNB.toLowerCase(), {
-    minAmountIn: BigInt(1e15), // 0.001 WBNB
-    maxAmountIn: BigInt(1e20), // 100 WBNB
-  });
+  // Note: All tokens must have amountConfig. Cycles starting from tokens without config will be skipped.
+  // tokenRegistry.addToken(new Token(TOKENS.ASTER, 'ASTER', {
+  //   minAmountIn: BigInt(1e10),
+  //   maxAmountIn: BigInt(1e19),
+  // }));
 
   // Create arbitrage instance with auto-discovery mode
-  const arbitrage = new CycleArbitrage(provider, tokenList, {
+  const arbitrage = new CycleArbitrage(provider, tokenRegistry, {
     minArbitrageBps: 2, // Minimum 2 bps profit
     scanIntervalMs: 1, // Scan every 1ms
     wssUrl: process.env.BSC_WSS_URL, // Optional: for real-time updates
     amountIn: BigInt(1e18), // 1 USDT (18 decimals) - fallback if optimization disabled
     // Enable amountIn optimization using Ternary Search
     optimizeAmountIn: true,
-    // Global defaults (used for cycles that don't specify minAmountIn/maxAmountIn)
-    minAmountIn: BigInt(1e10), // 0.0001 USDT - minimum search range
-    maxAmountIn: BigInt(1e21), // 10 USDT - maximum search range
     optimizationInterval: 100, // Re-optimize every 100 scans
     optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
     dashboardPort: 8080, // Enable HTTP dashboard on port 8080
     discoveryFees: [100, 500, 2500, 10000],
-    tokenNames, // Token name mapping for readable logs
-    tokenAmountConfig, // Amount config per start token
   });
 
   // Optional: Set execution (if you want to auto-execute)
