@@ -125,10 +125,10 @@ export class TradeExecutor extends EventEmitter {
       const exactOutputAmount = estimatedOut;
 
       // Calculate min profit (optional, set to 0 to disable check)
-      const minProfit = 0n;
+      const minProfit = 1n;
 
       // Tip amount (optional)
-      const tipAmount = 0n;
+      const tipAmount = ethers.parseEther('0.00001');
 
       // Get nonce từ cache
       const nonce = await this.wallet.getCachedNonce();
