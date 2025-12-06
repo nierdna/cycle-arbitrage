@@ -1,0 +1,26 @@
+Logic tính toán ra cơ hội arbitrage hiện tại đang là logic xuôi A -> B -> C -> A, còn logic triển khai trên contract đang tận dùng flashloan của PancakeSwapV3
+
+ví dụ [USDT-WBNB-USDT-500-100] phát hiện ra cơ hội arbitrage tức là 
+- swap 100 USDT được x WBNB ở USDT-WBNB-500
+- swap x WBNB được 101 USDT ở USDT-WBNB-100
+
+convert sang logic của pull token thì 
+- [WBNB-USDT] swap x WBNB được 101 USDT (pull 101 USDT về và nợ x WBNB) ở ở USDT-WBNB-100
+- [USDT-WBNB] swap exect out USDT nhận x WBNB ở USDT-WBNB-500 (nợ USDT)
+- trả 100 USDT cho USDT-WBNB-500
+- Tổng kết: lãi 1 USDT
+
+
+ví dụ [USDT-WBNB-ASTER-USDT-500-100-2500] phát hiện ra cơ hội arbitrage tức là 
+- swap 100 USDT được x WBNB ở USDT-WBNB-500
+- swap x WBNB được Y ASTER ở WBNB-ASTER-100
+- swap Y ASTER được 101 USDT ở ASTER-USDT-2500
+
+convert sang logic của pull token thì
+- [ASTER-USDT] swap Y ASTER được 101 USDT (pull 101 USDT về và nợ Y ASTER) ở ASTER-USDT-2500 
+- [WBNB-ASTER] swap exect out ASTER nhận Y ASTER ở WBNB-ASTER-100 (nợ X WBNB)
+- [USDT-WBNB] swap exect out WBNB nhận X WBNB ở USDT-WBNB-500 (nợ 100 USDT)
+- trả 100 USDT cho USDT-WBNB-500
+- trả X WBNB cho WBNB-ASTER-100
+- trả Y ASTER cho ASTER-USDT-2500
+- Tổng kết: lãi 1 USDT

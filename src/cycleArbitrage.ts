@@ -19,6 +19,8 @@ import {
   CycleFormatter,
   CycleScanner,
   TradeExecutor,
+  BundleConfig,
+  ArbitrageContractConfig,
 } from './services/index.js';
 
 export interface TokenAmountConfig {
@@ -64,7 +66,6 @@ export class CycleArbitrage {
   private stateFetcher: StateFetcher;
   private quoter: QuoterV3;
   private factory: ethers.Contract;
-  private router?: ethers.Contract;
   private logger: winston.Logger;
   private amountOptimizer?: AmountOptimizer;
   private metrics: MetricsCollector;
@@ -202,14 +203,23 @@ export class CycleArbitrage {
 
 
   /**
-   * Set wallet and router for execution (optional - for execution mode)
+   * Set wallet and arbitrage contract for execution (bundle mode only)
    */
-  setExecution(wallet: ethers.Wallet): void {
-    this.router = new ethers.Contract(CONSTANTS.BITSWAP_V3_ROUTER, CONSTANTS.ROUTER_ABI, wallet);
+  setExecution(
+    wallet: ethers.Wallet,
+    bundleConfig: BundleConfig,
+    contractAddress: string
+  ): void {
+    const contractConfig: ArbitrageContractConfig = {
+      contractAddress,
+      contractABI: CONSTANTS.ARBITRAGE_CONTRACT_ABI,
+    };
+
     this.tradeExecutor = new TradeExecutor(
-      this.router,
       wallet,
       this.logger,
+      bundleConfig,
+      contractConfig,
       this.metrics
     );
   }

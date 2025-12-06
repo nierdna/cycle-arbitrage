@@ -13,6 +13,7 @@ import 'dotenv/config';
 import { ethers } from 'ethers';
 import { CycleArbitrage } from '../src/cycleArbitrage.js';
 import { Token, TokenRegistry } from '../src/tokens/index.js';
+import { BundleConfig } from '../src/services/index.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
 
 // Token addresses on BSC (from execution/web3pro/const.py)
@@ -75,12 +76,32 @@ async function main() {
     // discoveryFees: [100, 500, 2500, 10000],
   });
 
-  // Optional: Set execution (if you want to auto-execute)
+  // Optional: Set execution with arbitrage contract (bundle mode only)
   if (process.env.PRIVATE_KEY) {
     const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-    arbitrage.setExecution(wallet);
+
+    // Bundle configuration
+    const bundleConfig: BundleConfig = {
+      rpcUrl: process.env.BUNDLE_RPC_URL || 'https://rpc.48.club',
+      apiUrl: process.env.BUNDLE_API_URL || 'https://puissant-builder.48.club/',
+      maxBlocks: parseInt(process.env.BUNDLE_MAX_BLOCKS || '50'),
+      maxSeconds: parseInt(process.env.BUNDLE_MAX_SECONDS || '120'),
+    };
+
+    // Arbitrage contract address (deploy from triangle-arbitrage-contract)
+    const arbitrageContractAddress = process.env.ARBITRAGE_CONTRACT_ADDRESS || '';
+
+    if (!arbitrageContractAddress) {
+      throw new Error(
+        'ARBITRAGE_CONTRACT_ADDRESS not set in .env. ' +
+        'Please deploy TriangleArbitrageBotBatch contract from triangle-arbitrage-contract and set the address.'
+      );
+    }
+
+    arbitrage.setExecution(wallet, bundleConfig, arbitrageContractAddress);
     console.log(`Wallet: ${wallet.address}`);
-    console.log('⚠ Execution mode enabled - will auto-execute trades!\n');
+    console.log(`Arbitrage Contract: ${arbitrageContractAddress}`);
+    console.log('⚠ Bundle execution mode enabled - will submit bundles!\n');
   } else {
     console.log('ℹ Execution mode disabled - only scanning (set PRIVATE_KEY to enable)\n');
   }

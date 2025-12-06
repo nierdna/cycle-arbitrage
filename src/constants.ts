@@ -57,3 +57,48 @@ export const POOL_SWAP_ABI = [
   },
 ];
 
+// Arbitrage Contract ABI (minimal - only execution methods)
+export const ARBITRAGE_CONTRACT_ABI = [
+  {
+    name: 'executeSimpleArbitrage',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'pool1', type: 'address' },
+      { name: 'pool2', type: 'address' },
+      { name: 'zeroForOne1', type: 'bool' },
+      { name: 'zeroForOne2', type: 'bool' },
+      { name: 'exactOutputAmount', type: 'uint256' },  // Exact output amount from Pool1 (số dương)
+      { name: 'sqrtPriceLimit1', type: 'uint160' },
+      { name: 'sqrtPriceLimit2', type: 'uint160' },
+      { name: 'minProfit', type: 'uint256' },
+      { name: 'tipAmount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+  {
+    name: 'executeTriangleArbitrage',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'pool1', type: 'address' },
+      { name: 'pool2', type: 'address' },
+      { name: 'pool3', type: 'address' },
+      { name: 'zeroForOne1', type: 'bool' },
+      { name: 'zeroForOne2', type: 'bool' },
+      { name: 'zeroForOne3', type: 'bool' },
+      { name: 'exactOutputAmount', type: 'uint256' },  // Exact output amount from Pool1 (số dương)
+      { name: 'sqrtPriceLimit1', type: 'uint160' },
+      { name: 'sqrtPriceLimit2', type: 'uint160' },
+      { name: 'sqrtPriceLimit3', type: 'uint160' },
+      { name: 'minProfit', type: 'uint256' },
+      { name: 'tipAmount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+];
+
+// Constants for sqrt price limits (from TickMath)
+export const MIN_SQRT_RATIO = '4295128740';  // MIN_SQRT_RATIO + 1
+export const MAX_SQRT_RATIO = '1461446703485210103287273052203988822378723970341';  // MAX_SQRT_RATIO - 1
+
