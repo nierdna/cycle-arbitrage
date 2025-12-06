@@ -30,9 +30,6 @@ export interface CycleConfig {
   tokens: string[]; // ["USDT", "WBNB", "USDT"]
   addresses: string[]; // BSC addresses
   fees: number[]; // [500, 100] in bps
-  // Optional: per-cycle optimization settings (override global defaults)
-  minAmountIn?: bigint; // Minimum amount to search for this cycle
-  maxAmountIn?: bigint; // Maximum amount to search for this cycle
 }
 
 

@@ -93,9 +93,9 @@ export class CycleDiscoveryService {
         continue; // Skip cycles without amount config
       }
 
-      // Priority: cycle.minAmountIn > tokenRegistry.getTokenAmountConfig(startToken)
-      const minAmountIn = cycle.minAmountIn ?? token.amountConfig.minAmountIn;
-      const maxAmountIn = cycle.maxAmountIn ?? token.amountConfig.maxAmountIn;
+      // Use amount config from token registry
+      const minAmountIn = token.amountConfig.minAmountIn;
+      const maxAmountIn = token.amountConfig.maxAmountIn;
 
       cyclesWithAmounts.push({
         ...cycle,
