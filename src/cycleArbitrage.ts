@@ -363,10 +363,11 @@ export class CycleArbitrage {
             ? data.optimalAmountIn!
             : data.amountIn;
 
-        const executeAmountOut = await this.estimateAmountOutForCycle(
-          cycleId,
-          executeAmount
-        );
+        // Lấy từ data, không estimate lại
+        const executeAmountOut =
+          executeAmount === data.amountIn
+            ? data.amountOut
+            : data.optimalAmountOut!;
 
         await this.tradeExecutor.executeCycle(
           cycleId,

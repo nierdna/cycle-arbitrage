@@ -216,6 +216,15 @@ export class CycleScanner extends EventEmitter {
   private async handleOpportunity(result: ScanResult): Promise<void> {
     if (!this.logger || !this.formatter) return;
 
+    // Estimate optimalAmountOut nếu có optimalAmountIn
+    let optimalAmountOut: bigint | undefined;
+    if (result.optimalAmountIn) {
+      optimalAmountOut = await this.estimateAmountOut(
+        this.cycleId,
+        result.optimalAmountIn
+      );
+    }
+
     // Emit opportunity event with full data
     this.emit('opportunity', {
       cycleId: this.cycleId,
@@ -223,6 +232,7 @@ export class CycleScanner extends EventEmitter {
       amountIn: result.amountIn,
       amountOut: result.amountOut,
       optimalAmountIn: result.optimalAmountIn,
+      optimalAmountOut: optimalAmountOut,
       optimalArbBps: result.optimalArbBps,
     });
 
