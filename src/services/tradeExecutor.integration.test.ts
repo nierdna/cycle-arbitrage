@@ -19,6 +19,7 @@ import { TradeExecutor, BundleConfig, ArbitrageContractConfig } from './tradeExe
 import { CycleWithState } from '../cycleArbitrage.js';
 import { ARBITRAGE_CONTRACT_ABI } from '../constants.js';
 import { getPoolAddressOrThrow } from '../utils/poolHelper.js';
+import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
 import * as dotenv from 'dotenv';
 
 // Load environment variables
@@ -32,7 +33,7 @@ const shouldSkipTests = !TEST_PRIVATE_KEY || !TEST_CONTRACT_ADDRESS;
 
 describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
   let executor: TradeExecutor;
-  let wallet: ethers.Wallet;
+  let wallet: NonceCachedWallet;
   let logger: winston.Logger;
   let bundleConfig: BundleConfig;
   let contractConfig: ArbitrageContractConfig;
@@ -54,16 +55,20 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
     // Create real provider for bundle and pool lookup
     provider = new ethers.JsonRpcProvider('https://rpc.48.club');
 
-    // Create real wallet with private key from env
-    wallet = new ethers.Wallet(TEST_PRIVATE_KEY!, provider);
-
     // Bundle config (same as script)
     bundleConfig = {
       rpcUrl: 'https://rpc.48.club',
       apiUrl: 'https://puissant-builder.48.club/',
       maxBlocks: 50,
       maxSeconds: 120,
+      nonceSyncIntervalMs: 30000, // Sync nonce every 30 seconds
     };
+
+    // Create NonceCachedWallet với nonce caching
+    wallet = new NonceCachedWallet(TEST_PRIVATE_KEY!, provider, {
+      syncIntervalMs: bundleConfig.nonceSyncIntervalMs,
+      logger: logger,
+    });
 
     // Contract config with real deployed address
     contractConfig = {

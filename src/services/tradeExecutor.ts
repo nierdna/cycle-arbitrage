@@ -19,12 +19,14 @@ import axios from 'axios';
 import { EventEmitter } from 'events';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { MIN_SQRT_RATIO, MAX_SQRT_RATIO } from '../constants.js';
+import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
 
 export interface BundleConfig {
   rpcUrl: string;
   apiUrl: string;
   maxBlocks: number;
   maxSeconds: number;
+  nonceSyncIntervalMs?: number; // Optional: interval để sync nonce (default: 30000ms = 30s)
 }
 
 export interface ArbitrageContractConfig {
@@ -36,9 +38,10 @@ export class TradeExecutor extends EventEmitter {
   private arbitrageContract: ethers.Contract;
   private contractAddress: string;
   private executingCycles: Set<string> = new Set(); // Track cycles đang execute
+  private wallet: NonceCachedWallet; // Use NonceCachedWallet instead of ethers.Wallet
 
   constructor(
-    private wallet: ethers.Wallet,
+    wallet: ethers.Wallet | NonceCachedWallet,
     private logger: winston.Logger,
     private bundleConfig: BundleConfig,
     contractConfig: ArbitrageContractConfig
@@ -47,11 +50,23 @@ export class TradeExecutor extends EventEmitter {
     // Save contract address
     this.contractAddress = contractConfig.contractAddress;
 
+    // Convert to NonceCachedWallet nếu chưa phải
+    if (wallet instanceof NonceCachedWallet) {
+      this.wallet = wallet;
+    } else {
+      // Create NonceCachedWallet từ ethers.Wallet
+      const provider = wallet.provider || new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
+      this.wallet = new NonceCachedWallet(wallet.privateKey, provider, {
+        syncIntervalMs: this.bundleConfig.nonceSyncIntervalMs,
+        logger: this.logger,
+      });
+    }
+
     // Create contract instance
     this.arbitrageContract = new ethers.Contract(
       contractConfig.contractAddress,
       contractConfig.contractABI,
-      wallet
+      this.wallet
     );
   }
 
@@ -115,14 +130,8 @@ export class TradeExecutor extends EventEmitter {
       // Tip amount (optional)
       const tipAmount = 0n;
 
-      // Create bundle provider
-      const bundleProvider = new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
-
-      // Get nonce and current block
-      const [nonce, block] = await Promise.all([
-        bundleProvider.getTransactionCount(this.wallet.address, "pending"),
-        bundleProvider.getBlockNumber(),
-      ]);
+      // Get nonce từ cache
+      const nonce = await this.wallet.getCachedNonce();
 
       // Encode function call based on pool count
       const iface = this.arbitrageContract.interface;
@@ -162,9 +171,8 @@ export class TradeExecutor extends EventEmitter {
       }
 
       // Get gas price
-      const feeData = await bundleProvider.getFeeData();
-      const maxPriorityFeePerGas = feeData.maxPriorityFeePerGas || ethers.parseUnits("2", "gwei");
-      const maxFeePerGas = feeData.maxFeePerGas || ethers.parseUnits("3", "gwei");
+      const maxPriorityFeePerGas = ethers.parseUnits("2", "gwei");
+      const maxFeePerGas = ethers.parseUnits("3", "gwei");
 
       // Estimate gas limit based on pool count
       const gasLimit = poolCount === 2 ? 500000n : 1000000n;
@@ -190,7 +198,6 @@ export class TradeExecutor extends EventEmitter {
       // Create bundle
       const bundle: any = {
         txs: [signedTx],
-        maxBlockNumber: block + this.bundleConfig.maxBlocks,
         maxTimestamp: Math.floor(Date.now() / 1000) + this.bundleConfig.maxSeconds,
         revertingTxHashes: [],
         noMerge: false,
@@ -220,10 +227,22 @@ export class TradeExecutor extends EventEmitter {
       );
 
       if (res.data.error) {
-        throw new Error(`Bundle submission failed: ${res.data.error.message}`);
+        const errorMsg = res.data.error.message || '';
+
+        // Check nếu error là nonce mismatch
+        if (errorMsg.includes('nonce') || errorMsg.includes('replacement') || errorMsg.includes('already known')) {
+          this.logger.warn(`[${cycleId}] Nonce error detected, syncing nonce...`);
+          await this.wallet.syncNonce();
+          // Không retry tự động, để caller quyết định
+        }
+
+        throw new Error(`Bundle submission failed: ${errorMsg}`);
       }
 
       this.logger.info(`[${cycleId}] ✓ Bundle submitted successfully`);
+
+      // Increment nonce sau khi submit thành công
+      this.wallet.incrementNonce();
 
       let txHash: string | undefined;
 
