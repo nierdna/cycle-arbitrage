@@ -59,13 +59,15 @@ export class TradeExecutor {
    * Only supports 2 pools (simple) or 3 pools (triangle)
    * 
    * IMPORTANT: Reverse pools and fees order for flash loan logic
+   * 
+   * @returns Transaction hash of the first transaction in the bundle, or undefined if not available
    */
   async executeCycle(
     cycleId: string,
     cycle: CycleWithState,
     amountIn: bigint,
     estimatedOut: bigint
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     try {
       const poolCount = cycle.poolAddresses.length;
 
@@ -211,8 +213,20 @@ export class TradeExecutor {
 
       this.logger.info(`[${cycleId}] ✓ Bundle submitted successfully`);
 
+      let txHash: string | undefined;
+
       if (res.data.result) {
         this.logger.info(`[${cycleId}] Bundle result: ${res.data.result}`);
+
+        // Fetch transaction hash from bundle
+        try {
+          txHash = await this.getTxHashFromBundle(res.data.result);
+          if (txHash) {
+            this.logger.info(`[${cycleId}] Transaction hash: ${txHash}`);
+          }
+        } catch (error: any) {
+          this.logger.warn(`[${cycleId}] Failed to fetch tx hash from bundle: ${error.message || error}`);
+        }
       }
 
       // Log estimated profit
@@ -226,9 +240,36 @@ export class TradeExecutor {
       // Record opportunity
       this.metrics?.recordOpportunity(cycleId, estimatedProfitBps, amountIn);
 
+      return txHash;
+
     } catch (error: any) {
       this.logger.error(`[${cycleId}] ✗ Bundle submission failed:`, error.message || error);
       throw error;
+    }
+  }
+
+  /**
+   * Get transaction hash from bundle hash by calling 48.club explore API
+   * 
+   * @param bundleHash Bundle hash from bundle submission result
+   * @returns First transaction hash from the bundle, or undefined if not available
+   */
+  private async getTxHashFromBundle(bundleHash: string): Promise<string | undefined> {
+    try {
+      const response = await axios.get(
+        `https://explore.48.club/v2/bundle?hash=${bundleHash}`,
+        {
+          timeout: 10000,
+        }
+      );
+
+      if (response.data?.txs && Array.isArray(response.data.txs) && response.data.txs.length > 0) {
+        return response.data.txs[0].tx_hash;
+      }
+
+      return undefined;
+    } catch (error: any) {
+      throw new Error(`Failed to fetch tx hash from bundle: ${error.message || error}`);
     }
   }
 
