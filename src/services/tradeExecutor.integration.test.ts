@@ -43,7 +43,7 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
   // Test data - Real token addresses on BSC
   const USDT = '0x55d398326f99059fF775485246999027B3197955';
   const WBNB = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
-  const ASTER = '0x000Ae314E2A2172a039B26378814C252734f556A';
+  const BLESS = '0x7C8217517ed4711fe2DECCdFefFE8d906b9Ae11F';
 
   beforeAll(() => {
     // Create real logger
@@ -135,25 +135,25 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
   it('should successfully execute 3-pool triangle arbitrage and submit real bundle', async () => {
     // Get real pool addresses using helper
     console.log('\n🔍 Looking up pool addresses...');
-    const pool1 = await getPoolAddressOrThrow(provider, USDT, WBNB, 500);
-    const pool2 = await getPoolAddressOrThrow(provider, WBNB, ASTER, 100);
-    const pool3 = await getPoolAddressOrThrow(provider, ASTER, USDT, 2500);
-    console.log('  Pool1 (USDT-WBNB-500):', pool1);
-    console.log('  Pool2 (WBNB-ASTER-100):', pool2);
-    console.log('  Pool3 (ASTER-USDT-2500):', pool3);
+    const pool1 = await getPoolAddressOrThrow(provider, USDT, WBNB, 2500);
+    const pool2 = await getPoolAddressOrThrow(provider, WBNB, BLESS, 100);
+    const pool3 = await getPoolAddressOrThrow(provider, BLESS, USDT, 10000);
+    console.log('  Pool1 (USDT-WBNB-2500):', pool1);
+    console.log('  Pool2 (WBNB-BLESS-100):', pool2);
+    console.log('  Pool3 (BLESS-USDT-10000):', pool3);
 
     const cycle: CycleWithState = {
       cycleId: 'integration-test-3pools',
-      tokens: ['USDT', 'WBNB', 'ASTER', 'USDT'],
-      addresses: [USDT, WBNB, ASTER, USDT],
-      fees: [500, 100, 2500],
+      tokens: ['USDT', 'WBNB', 'BLESS', 'USDT'],
+      addresses: [USDT, WBNB, BLESS, USDT],
+      fees: [2500, 100, 10000],
       poolAddresses: [pool1, pool2, pool3],
       minAmountIn: ethers.parseEther('0.1'),
       maxAmountIn: ethers.parseEther('10'),
     };
 
-    const amountIn = ethers.parseEther('0.0000001'); // 0.0000001 USDT
-    const estimatedOut = ethers.parseEther('0.00000012'); // 0.00000012 USDT (2% profit)
+    const amountIn = ethers.parseEther('0.0001');
+    const estimatedOut = ethers.parseEther('0.0001'); 
 
     console.log('\n📊 Test Parameters:');
     console.log('  Cycle ID:', cycle.cycleId);

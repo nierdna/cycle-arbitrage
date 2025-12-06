@@ -174,7 +174,7 @@ export class TradeExecutor {
       const signedTx = await this.wallet.signTransaction(tx);
 
       // Create bundle
-      const bundle = {
+      const bundle: any = {
         txs: [signedTx],
         maxBlockNumber: block + this.bundleConfig.maxBlocks,
         maxTimestamp: Math.floor(Date.now() / 1000) + this.bundleConfig.maxSeconds,
@@ -182,6 +182,11 @@ export class TradeExecutor {
         noMerge: false,
         noTail: false,
       };
+
+      // Sign bundle with 48spSign
+      this.logger.info(`[${cycleId}] Signing bundle with 48spSign...`);
+      const bundleSign = this.signBundle48sp([signedTx]);
+      bundle['48spSign'] = bundleSign;
 
       // Submit bundle
       this.logger.info(`[${cycleId}] Submitting bundle to ${this.bundleConfig.apiUrl}...`);
@@ -290,5 +295,55 @@ export class TradeExecutor {
     } else {
       return { token0: tokenB, token1: tokenA };
     }
+  }
+
+  /**
+   * Sign bundle with 48spSign according to 48.club docs
+   * Based on working JavaScript example
+   * 
+   * Process:
+   * 1. Hash each raw transaction (keccak256)
+   * 2. Concatenate all hashes
+   * 3. Hash the concatenated hashes
+   * 4. Sign the final hash with private key
+   * 5. Format signature: r (32 bytes) + s (32 bytes) + v (1 byte, recovery id 0 or 1)
+   * 
+   * @param rawTxs Array of raw signed transactions (RLP-encoded hex strings)
+   * @returns Hex string signature (0x...)
+   */
+  private signBundle48sp(rawTxs: string[]): string {
+    // 1. Hash từng tx và concat
+    let concatenatedHashes = new Uint8Array(0);
+
+    for (const rawTx of rawTxs) {
+      // Ensure rawTx has 0x prefix
+      const txHex = rawTx.startsWith('0x') ? rawTx : '0x' + rawTx;
+      // Hash the raw transaction (RLP-encoded)
+      const txHash = ethers.keccak256(txHex);
+      const txHashBytes = ethers.getBytes(txHash);
+
+      // Concatenate
+      const newArray = new Uint8Array(concatenatedHashes.length + txHashBytes.length);
+      newArray.set(concatenatedHashes, 0);
+      newArray.set(txHashBytes, concatenatedHashes.length);
+      concatenatedHashes = newArray;
+    }
+
+    // 2. Hash chuỗi concat
+    const concatenatedHex = ethers.hexlify(concatenatedHashes);
+    const finalHash = ethers.keccak256(concatenatedHex);
+    const finalHashBytes = ethers.getBytes(finalHash);
+
+    // 3. Sign với private key (sign bytes trực tiếp)
+    const signature = this.wallet.signingKey.sign(finalHashBytes);
+
+    // 4. Format signature: r (32 bytes) + s (32 bytes) + v (1 byte)
+    // QUAN TRỌNG: recovery id phải là 0 hoặc 1, không phải 27 hoặc 28
+    const r = signature.r.slice(2); // Remove 0x prefix
+    const s = signature.s.slice(2); // Remove 0x prefix
+    const recoveryId = signature.v >= 27 ? signature.v - 27 : signature.v; // 27->0, 28->1
+    const vHex = recoveryId.toString(16).padStart(2, '0');
+
+    return '0x' + r + s + vHex;
   }
 }
