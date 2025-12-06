@@ -35,6 +35,7 @@ export interface ArbitrageContractConfig {
 export class TradeExecutor extends EventEmitter {
   private arbitrageContract: ethers.Contract;
   private contractAddress: string;
+  private executingCycles: Set<string> = new Set(); // Track cycles đang execute
 
   constructor(
     private wallet: ethers.Wallet,
@@ -68,6 +69,17 @@ export class TradeExecutor extends EventEmitter {
     amountIn: bigint,
     estimatedOut: bigint
   ): Promise<string | undefined> {
+    // Check if cycle is already executing
+    if (this.executingCycles.has(cycleId)) {
+      this.logger.warn(
+        `[${cycleId}] Cycle is already executing. Skipping duplicate execution.`
+      );
+      return undefined;
+    }
+
+    // Set lock
+    this.executingCycles.add(cycleId);
+
     try {
       const poolCount = cycle.poolAddresses.length;
 
@@ -256,6 +268,9 @@ export class TradeExecutor extends EventEmitter {
     } catch (error: any) {
       this.logger.error(`[${cycleId}] ✗ Bundle submission failed:`, error.message || error);
       throw error;
+    } finally {
+      // Always release lock
+      this.executingCycles.delete(cycleId);
     }
   }
 
