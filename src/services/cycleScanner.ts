@@ -40,8 +40,7 @@ export class CycleScanner extends EventEmitter {
     private options: ScanOptions,
     private amountOptimizer?: AmountOptimizer,
     private logger?: winston.Logger,
-    private formatter?: CycleFormatter,
-    private onOpportunity?: (result: ScanResult) => Promise<void>
+    private formatter?: CycleFormatter
   ) {
     super(); // Call EventEmitter constructor
     this.currentAmountIn = options.amountIn;
@@ -217,11 +216,14 @@ export class CycleScanner extends EventEmitter {
   private async handleOpportunity(result: ScanResult): Promise<void> {
     if (!this.logger || !this.formatter) return;
 
-    // Emit opportunity event
+    // Emit opportunity event with full data
     this.emit('opportunity', {
       cycleId: this.cycleId,
       arbitrageBps: result.arbitrageBps,
       amountIn: result.amountIn,
+      amountOut: result.amountOut,
+      optimalAmountIn: result.optimalAmountIn,
+      optimalArbBps: result.optimalArbBps,
     });
 
     const timestamp = new Date().toISOString();
@@ -240,11 +242,6 @@ export class CycleScanner extends EventEmitter {
       optimalArbBps: result.optimalArbBps?.toFixed(2),
       timestamp,
     });
-
-    // Notify parent
-    if (this.onOpportunity) {
-      await this.onOpportunity(result);
-    }
   }
 
   private sleep(ms: number): Promise<void> {

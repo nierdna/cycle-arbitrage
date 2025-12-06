@@ -342,30 +342,7 @@ export class CycleArbitrage {
       },
       this.amountOptimizer,
       this.logger,
-      this.formatter,
-      async (result) => {
-        // Handle opportunity - execute if wallet/router is set
-        if (this.tradeExecutor) {
-          const executeAmount =
-            this.options.optimizeAmountIn &&
-              result.optimalArbBps &&
-              result.optimalArbBps > result.arbitrageBps
-              ? result.optimalAmountIn!
-              : result.amountIn;
-
-          const executeAmountOut = await this.estimateAmountOutForCycle(
-            cycleId,
-            executeAmount
-          );
-
-          await this.tradeExecutor.executeCycle(
-            cycleId,
-            cycle,
-            executeAmount,
-            executeAmountOut
-          );
-        }
-      }
+      this.formatter
     );
 
     // Subscribe to CycleScanner events
@@ -373,8 +350,31 @@ export class CycleArbitrage {
       this.metrics.recordScan(data.cycleId);
     });
 
-    scanner.on('opportunity', (data) => {
+    scanner.on('opportunity', async (data) => {
+      // Record metrics
       this.metrics.recordOpportunity(data.cycleId, data.arbitrageBps, data.amountIn);
+
+      // Execute trade if tradeExecutor is set
+      if (this.tradeExecutor) {
+        const executeAmount =
+          this.options.optimizeAmountIn &&
+            data.optimalArbBps &&
+            data.optimalArbBps > data.arbitrageBps
+            ? data.optimalAmountIn!
+            : data.amountIn;
+
+        const executeAmountOut = await this.estimateAmountOutForCycle(
+          cycleId,
+          executeAmount
+        );
+
+        await this.tradeExecutor.executeCycle(
+          cycleId,
+          cycle,
+          executeAmount,
+          executeAmountOut
+        );
+      }
     });
 
     scanner.on('arbitrage-bps', (data) => {
