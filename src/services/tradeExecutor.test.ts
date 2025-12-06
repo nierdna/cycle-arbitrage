@@ -3,7 +3,7 @@
  * Tests for getToken0Token1 and calculateZeroForOneFlagsForFlashLoan methods
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ethers } from 'ethers';
 import winston from 'winston';
 import { TradeExecutor, BundleConfig, ArbitrageContractConfig } from './tradeExecutor.js';
@@ -49,8 +49,8 @@ describe('TradeExecutor', () => {
       chainId: 56n,
       name: 'bsc',
     });
-    vi.spyOn(provider, 'resolveName' as any).mockImplementation((name: string) => {
-      if (name.startsWith('0x')) {
+    vi.spyOn(provider, 'resolveName' as any).mockImplementation((name: unknown) => {
+      if (typeof name === 'string' && name.startsWith('0x')) {
         return Promise.resolve(name);
       }
       return Promise.resolve(null);
