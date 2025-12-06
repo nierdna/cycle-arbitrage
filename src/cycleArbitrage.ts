@@ -219,9 +219,17 @@ export class CycleArbitrage {
       wallet,
       this.logger,
       bundleConfig,
-      contractConfig,
-      this.metrics
+      contractConfig
     );
+
+    // Subscribe to TradeExecutor events
+    this.tradeExecutor.on('opportunity', (data) => {
+      this.metrics.recordOpportunity(data.cycleId, data.arbitrageBps, data.amountIn);
+    });
+
+    this.tradeExecutor.on('execution', (data) => {
+      this.metrics.recordExecution(data.cycleId, data.profit);
+    });
   }
 
   /**
@@ -333,7 +341,6 @@ export class CycleArbitrage {
         optimizationPrecision: this.options.optimizationPrecision,
       },
       this.amountOptimizer,
-      this.metrics,
       this.logger,
       this.formatter,
       async (result) => {
@@ -360,6 +367,23 @@ export class CycleArbitrage {
         }
       }
     );
+
+    // Subscribe to CycleScanner events
+    scanner.on('scan', (data) => {
+      this.metrics.recordScan(data.cycleId);
+    });
+
+    scanner.on('opportunity', (data) => {
+      this.metrics.recordOpportunity(data.cycleId, data.arbitrageBps, data.amountIn);
+    });
+
+    scanner.on('arbitrage-bps', (data) => {
+      this.metrics.recordArbitrageBps(data.cycleId, data.arbitrageBps);
+    });
+
+    scanner.on('optimization-result', (data) => {
+      this.metrics.recordOptimizationResult(data.cycleId, data.amountIn, data.arbitrageBps);
+    });
 
     await scanner.start();
   }

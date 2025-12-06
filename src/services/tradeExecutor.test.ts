@@ -9,7 +9,6 @@ import winston from 'winston';
 import { TradeExecutor, BundleConfig, ArbitrageContractConfig } from './tradeExecutor.js';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { ARBITRAGE_CONTRACT_ABI } from '../constants.js';
-import { MetricsCollector } from '../monitoring/metrics.js';
 
 // Mock dependencies
 vi.mock('axios');
@@ -21,7 +20,6 @@ describe('TradeExecutor', () => {
   let provider: ethers.JsonRpcProvider;
   let bundleConfig: BundleConfig;
   let contractConfig: ArbitrageContractConfig;
-  let mockMetrics: MetricsCollector;
 
   // Test data - Token addresses
   const USDT = '0x55d398326f99059fF775485246999027B3197955';
@@ -36,11 +34,6 @@ describe('TradeExecutor', () => {
       error: vi.fn(),
       debug: vi.fn(),
     } as unknown as winston.Logger;
-
-    // Mock metrics
-    mockMetrics = {
-      recordOpportunity: vi.fn(),
-    } as unknown as MetricsCollector;
 
     // Create provider (mocked to avoid network calls)
     provider = new ethers.JsonRpcProvider('https://bsc-dataseed.binance.org/');
@@ -78,8 +71,7 @@ describe('TradeExecutor', () => {
       wallet,
       mockLogger,
       bundleConfig,
-      contractConfig,
-      mockMetrics
+      contractConfig
     );
   });
 

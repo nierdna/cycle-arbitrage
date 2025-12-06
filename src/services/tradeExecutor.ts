@@ -16,8 +16,8 @@
 import { ethers } from 'ethers';
 import winston from 'winston';
 import axios from 'axios';
+import { EventEmitter } from 'events';
 import { CycleWithState } from '../cycleArbitrage.js';
-import { MetricsCollector } from '../monitoring/metrics.js';
 import { MIN_SQRT_RATIO, MAX_SQRT_RATIO } from '../constants.js';
 
 export interface BundleConfig {
@@ -32,7 +32,7 @@ export interface ArbitrageContractConfig {
   contractABI: any[];
 }
 
-export class TradeExecutor {
+export class TradeExecutor extends EventEmitter {
   private arbitrageContract: ethers.Contract;
   private contractAddress: string;
 
@@ -40,9 +40,9 @@ export class TradeExecutor {
     private wallet: ethers.Wallet,
     private logger: winston.Logger,
     private bundleConfig: BundleConfig,
-    contractConfig: ArbitrageContractConfig,
-    private metrics?: MetricsCollector
+    contractConfig: ArbitrageContractConfig
   ) {
+    super(); // Call EventEmitter constructor
     // Save contract address
     this.contractAddress = contractConfig.contractAddress;
 
@@ -237,8 +237,19 @@ export class TradeExecutor {
         `[${cycleId}] Estimated profit: ${ethers.formatEther(estimatedProfit)} tokens (${estimatedProfitBps.toFixed(2)} bps)`
       );
 
-      // Record opportunity
-      this.metrics?.recordOpportunity(cycleId, estimatedProfitBps, amountIn);
+      // Emit opportunity event
+      this.emit('opportunity', {
+        cycleId,
+        arbitrageBps: estimatedProfitBps,
+        amountIn,
+      });
+
+      // Emit execution event (bundle submitted successfully)
+      this.emit('execution', {
+        cycleId,
+        profit: estimatedProfit,
+        txHash,
+      });
 
       return txHash;
 

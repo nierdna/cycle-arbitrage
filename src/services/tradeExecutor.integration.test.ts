@@ -18,7 +18,6 @@ import winston from 'winston';
 import { TradeExecutor, BundleConfig, ArbitrageContractConfig } from './tradeExecutor.js';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { ARBITRAGE_CONTRACT_ABI } from '../constants.js';
-import { MetricsCollector } from '../monitoring/metrics.js';
 import { getPoolAddressOrThrow } from '../utils/poolHelper.js';
 import * as dotenv from 'dotenv';
 
@@ -37,7 +36,6 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
   let logger: winston.Logger;
   let bundleConfig: BundleConfig;
   let contractConfig: ArbitrageContractConfig;
-  let metrics: MetricsCollector;
   let provider: ethers.JsonRpcProvider;
 
   // Test data - Real token addresses on BSC
@@ -52,13 +50,6 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
       format: winston.format.simple(),
       transports: [new winston.transports.Console()],
     });
-
-    // Create real metrics (optional)
-    metrics = {
-      recordOpportunity: (cycleId: string, profitBps: number, amountIn: bigint) => {
-        console.log(`[Metrics] Cycle: ${cycleId}, Profit: ${profitBps} bps, Amount: ${ethers.formatEther(amountIn)}`);
-      },
-    } as MetricsCollector;
 
     // Create real provider for bundle and pool lookup
     provider = new ethers.JsonRpcProvider('https://rpc.48.club');
@@ -85,9 +76,17 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
       wallet,
       logger,
       bundleConfig,
-      contractConfig,
-      metrics
+      contractConfig
     );
+
+    // Subscribe to events for logging
+    executor.on('opportunity', (data) => {
+      console.log(`[Metrics] Cycle: ${data.cycleId}, Profit: ${data.arbitrageBps} bps, Amount: ${ethers.formatEther(data.amountIn || 0n)}`);
+    });
+
+    executor.on('execution', (data) => {
+      console.log(`[Execution] Cycle: ${data.cycleId}, Profit: ${ethers.formatEther(data.profit)}, TX: ${data.txHash || 'N/A'}`);
+    });
 
     console.log('\n🔧 Integration Test Setup:');
     console.log('  Wallet address:', wallet.address);

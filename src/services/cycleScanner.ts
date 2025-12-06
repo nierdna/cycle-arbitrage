@@ -5,8 +5,8 @@
 
 import { ethers } from 'ethers';
 import winston from 'winston';
+import { EventEmitter } from 'events';
 import { AmountOptimizer } from '../optimization/amountOptimizer.js';
-import { MetricsCollector } from '../monitoring/metrics.js';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { CycleFormatter } from './cycleFormatter.js';
 
@@ -27,7 +27,7 @@ export interface ScanResult {
   optimalArbBps?: number;
 }
 
-export class CycleScanner {
+export class CycleScanner extends EventEmitter {
   private scanCount = 0;
   private currentAmountIn: bigint;
   private optimalAmountIn: bigint;
@@ -39,11 +39,11 @@ export class CycleScanner {
     private estimateAmountOut: (cycleId: string, amountIn: bigint) => Promise<bigint>,
     private options: ScanOptions,
     private amountOptimizer?: AmountOptimizer,
-    private metrics?: MetricsCollector,
     private logger?: winston.Logger,
     private formatter?: CycleFormatter,
     private onOpportunity?: (result: ScanResult) => Promise<void>
   ) {
+    super(); // Call EventEmitter constructor
     this.currentAmountIn = options.amountIn;
     this.optimalAmountIn = options.amountIn;
   }
@@ -96,11 +96,12 @@ export class CycleScanner {
       this.optimalArbBps = optimal.arbitrageBps;
       this.currentAmountIn = this.optimalAmountIn;
 
-      this.metrics?.recordOptimizationResult(
-        this.cycleId,
-        this.optimalAmountIn,
-        this.optimalArbBps
-      );
+      // Emit optimization result event
+      this.emit('optimization-result', {
+        cycleId: this.cycleId,
+        amountIn: this.optimalAmountIn,
+        arbitrageBps: this.optimalArbBps,
+      });
 
       this.logger.info(
         `[${this.cycleId}] Optimal: ${ethers.formatEther(this.optimalAmountIn)} tokens, ` +
@@ -121,8 +122,8 @@ export class CycleScanner {
     minAmountIn: bigint,
     maxAmountIn: bigint
   ): Promise<void> {
-    // Record scan
-    this.metrics?.recordScan(this.cycleId);
+    // Emit scan event
+    this.emit('scan', { cycleId: this.cycleId });
 
     // Re-optimize periodically if enabled
     if (
@@ -144,9 +145,12 @@ export class CycleScanner {
 
     this.scanCount++;
 
-    // Record arbitrage BPS for historical chart (every 1000 scans)
+    // Emit arbitrage BPS event for historical chart (every 1000 scans)
     if (this.scanCount % 1000 === 0) {
-      this.metrics?.recordArbitrageBps(this.cycleId, arbitrageBps);
+      this.emit('arbitrage-bps', {
+        cycleId: this.cycleId,
+        arbitrageBps,
+      });
     }
 
     // Check for opportunity
@@ -190,11 +194,12 @@ export class CycleScanner {
         this.optimalArbBps = optimal.arbitrageBps;
         this.currentAmountIn = this.optimalAmountIn;
 
-        this.metrics?.recordOptimizationResult(
-          this.cycleId,
-          this.optimalAmountIn,
-          this.optimalArbBps
-        );
+        // Emit optimization result event
+        this.emit('optimization-result', {
+          cycleId: this.cycleId,
+          amountIn: this.optimalAmountIn,
+          arbitrageBps: this.optimalArbBps,
+        });
 
         this.logger.info(
           `[${this.cycleId}] Re-optimized: ${ethers.formatEther(this.optimalAmountIn)} tokens, ` +
@@ -212,12 +217,12 @@ export class CycleScanner {
   private async handleOpportunity(result: ScanResult): Promise<void> {
     if (!this.logger || !this.formatter) return;
 
-    // Record opportunity
-    this.metrics?.recordOpportunity(
-      this.cycleId,
-      result.arbitrageBps,
-      result.amountIn
-    );
+    // Emit opportunity event
+    this.emit('opportunity', {
+      cycleId: this.cycleId,
+      arbitrageBps: result.arbitrageBps,
+      amountIn: result.amountIn,
+    });
 
     const timestamp = new Date().toISOString();
     const cyclePath = this.formatter.formatCyclePath(this.cycle.tokens);
