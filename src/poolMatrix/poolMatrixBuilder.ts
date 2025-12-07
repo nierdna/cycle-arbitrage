@@ -5,17 +5,14 @@
 
 import { ethers } from 'ethers';
 import { PoolInfo, PoolMatrix } from './types.js';
-import * as CONSTANTS from '../constants.js';
+import { computePoolAddress } from '../utils/poolHelper.js';
 
 export class PoolMatrixBuilder {
-  private factory: ethers.Contract;
+  private provider?: ethers.Provider;
 
-  constructor(provider: ethers.Provider) {
-    this.factory = new ethers.Contract(
-      CONSTANTS.PANCAKE_V3_FACTORY,
-      CONSTANTS.FACTORY_ABI,
-      provider
-    );
+  constructor(provider?: ethers.Provider) {
+    // Provider is optional - only needed if we want to check pool existence
+    this.provider = provider;
   }
 
   /**
@@ -29,7 +26,11 @@ export class PoolMatrixBuilder {
   }
 
   /**
-   * Find pool address for a token pair with specific fee
+   * Find pool address for a token pair with specific fee (off-chain computation)
+   * Uses CREATE2 to compute pool address without on-chain call
+   * 
+   * Note: This computes the address but doesn't verify pool exists.
+   * Pool existence will be validated when actually used (fetching state, swapping, etc.)
    */
   async findPool(
     token0: string,
@@ -41,14 +42,27 @@ export class PoolMatrixBuilder {
       a.toLowerCase().localeCompare(b.toLowerCase())
     );
 
-    const poolAddress = await this.factory.getPool(t0, t1, fee);
+    // Compute pool address off-chain using CREATE2
+    const poolAddress = computePoolAddress(t0, t1, fee);
+
+    // Check if pool exists by verifying code size (optional)
+    let exists = true;
+    if (this.provider) {
+      try {
+        const code = await this.provider.getCode(poolAddress);
+        exists = code !== '0x' && code.length > 2; // Non-empty code means contract exists
+      } catch (error) {
+        // If check fails, assume pool exists (will be validated later)
+        exists = true;
+      }
+    }
 
     return {
       token0: t0,
       token1: t1,
       fee,
       poolAddress,
-      exists: poolAddress !== ethers.ZeroAddress,
+      exists,
     };
   }
 
