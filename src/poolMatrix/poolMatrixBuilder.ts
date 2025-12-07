@@ -5,7 +5,7 @@
 
 import { ethers } from 'ethers';
 import { PoolInfo, PoolMatrix } from './types.js';
-import { computePoolAddress } from '../utils/poolHelper.js';
+import { computePoolAddress, sortTokens } from '../utils/poolHelper.js';
 
 export class PoolMatrixBuilder {
   private provider?: ethers.Provider;
@@ -16,12 +16,10 @@ export class PoolMatrixBuilder {
   }
 
   /**
-   * Get pool key for a token pair with fee (sorted, lowercase)
+   * Get pool key for a token pair with fee (sorted using BigInt comparison)
    */
   private getPoolKey(token0: string, token1: string, fee: number): string {
-    const [t0, t1] = [token0, token1].sort((a, b) =>
-      a.toLowerCase().localeCompare(b.toLowerCase())
-    );
+    const [t0, t1] = sortTokens(token0, token1);
     return `${t0.toLowerCase()}-${t1.toLowerCase()}-${fee}`;
   }
 
@@ -37,10 +35,8 @@ export class PoolMatrixBuilder {
     token1: string,
     fee: number
   ): Promise<PoolInfo> {
-    // Sort tokens (Uniswap V3 requirement)
-    const [t0, t1] = [token0, token1].sort((a, b) =>
-      a.toLowerCase().localeCompare(b.toLowerCase())
-    );
+    // Sort tokens (token0 < token1) using BigInt comparison (same as computePoolAddress)
+    const [t0, t1] = sortTokens(token0, token1);
 
     // Compute pool address off-chain using CREATE2
     const poolAddress = computePoolAddress(t0, t1, fee);

@@ -7,6 +7,21 @@ import { ethers } from 'ethers';
 import { PANCAKE_V3_FACTORY, PANCAKE_V3_POOL_DEPLOYER, V3_INIT_CODE_HASH, FACTORY_ABI } from '../constants.js';
 
 /**
+ * Sort two token addresses to ensure token0 < token1 (uint160 comparison)
+ * This matches the sorting logic used in PancakeSwap V3 contracts
+ * 
+ * @param tokenA - First token address
+ * @param tokenB - Second token address
+ * @returns Sorted token addresses [token0, token1] where token0 < token1
+ */
+export function sortTokens(tokenA: string, tokenB: string): [string, string] {
+  // Compare addresses as uint160 (BigInt) - same as Solidity address comparison
+  const addrA = BigInt(tokenA);
+  const addrB = BigInt(tokenB);
+  return addrA < addrB ? [tokenA, tokenB] : [tokenB, tokenA];
+}
+
+/**
  * Compute pool address off-chain using CREATE2 (no on-chain call)
  * Based on PancakeSwap V3 PoolDeployer logic
  * 
@@ -21,14 +36,7 @@ export function computePoolAddress(
   fee: number
 ): string {
   // Sort tokens (token0 < token1) - compare addresses as uint160 (BigInt)
-  const addr0 = BigInt(token0);
-  const addr1 = BigInt(token1);
-  const [t0, t1] = addr0 < addr1 ? [token0, token1] : [token1, token0];
-
-  // Ensure token0 < token1 (as required by CREATE2 salt)
-  if (BigInt(t0) >= BigInt(t1)) {
-    throw new Error('Invalid token pair: token0 must be less than token1');
-  }
+  const [t0, t1] = sortTokens(token0, token1);
 
   // Compute salt: keccak256(abi.encode(token0, token1, fee))
   const salt = ethers.keccak256(
