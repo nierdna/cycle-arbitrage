@@ -241,6 +241,9 @@ export class CycleArbitrage {
     // Initialize token registry (load decimal cache from file)
     await this.tokenRegistry.initialize();
 
+    // Initialize pool matrix builder cache (load pool existence cache from file)
+    await this.poolMatrixBuilder.initialize();
+
     // Discover cycles if not already discovered
     if (this.cycles.size === 0) {
       await this.discoverCycles();

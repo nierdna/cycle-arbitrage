@@ -9,16 +9,27 @@ import { computePoolAddress, sortTokens } from '../utils/poolHelper.js';
 import { checkPoolLiquidity } from '../utils/poolLiquidityHelper.js';
 import { TokenRegistry } from '../tokens/tokenRegistry.js';
 import { MIN_POOL_LIQUIDITY_USD } from '../constants.js';
+import { PoolExistenceCache } from './poolExistenceCache.js';
 
 export class PoolMatrixBuilder {
   private provider?: ethers.Provider;
   private tokenRegistry?: TokenRegistry;
+  private existenceCache: PoolExistenceCache;
 
   constructor(provider?: ethers.Provider, tokenRegistry?: TokenRegistry) {
-  // Provider is optional - only needed if we want to check pool existence/liquidity
+    // Provider is optional - only needed if we want to check pool existence/liquidity
     this.provider = provider;
     // TokenRegistry is optional - needed for liquidity checks (decimal cache)
     this.tokenRegistry = tokenRegistry;
+    // Initialize pool existence cache
+    this.existenceCache = new PoolExistenceCache();
+  }
+
+  /**
+   * Initialize cache (load from file)
+   */
+  async initialize(): Promise<void> {
+    await this.existenceCache.load();
   }
 
   /**
@@ -48,14 +59,27 @@ export class PoolMatrixBuilder {
     const poolAddress = computePoolAddress(t0, t1, fee);
 
     // Check if pool exists by verifying code size (optional)
+    // Use cache first to avoid repeated RPC calls
     let exists = true;
     if (this.provider) {
-      try {
-        const code = await this.provider.getCode(poolAddress);
-        exists = code !== '0x' && code.length > 2; // Non-empty code means contract exists
-      } catch (error) {
-        // If check fails, assume pool exists (will be validated later)
-        exists = true;
+      // Check cache first
+      const cachedExists = this.existenceCache.get(poolAddress);
+
+      if (cachedExists !== undefined) {
+        // Use cached value
+        exists = cachedExists;
+      } else {
+      // Not in cache, fetch from chain
+        try {
+          const code = await this.provider.getCode(poolAddress);
+          exists = code !== '0x' && code.length > 2; // Non-empty code means contract exists
+
+          // Save to cache (async, don't wait)
+          await this.existenceCache.set(poolAddress, exists);
+        } catch (error) {
+          // If check fails, assume pool exists (will be validated later)
+          exists = true;
+        }
       }
     }
 
