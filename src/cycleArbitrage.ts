@@ -22,6 +22,7 @@ import {
   BundleConfig,
   ArbitrageContractConfig,
 } from './services/index.js';
+import { computePoolAddress } from './utils/poolHelper.js';
 
 export interface TokenAmountConfig {
   minAmountIn: bigint;
@@ -65,7 +66,6 @@ export class CycleArbitrage {
   private provider: ethers.Provider;
   private stateFetcher: StateFetcher;
   private quoter: QuoterV3;
-  private factory: ethers.Contract;
   private logger: winston.Logger;
   private amountOptimizer?: AmountOptimizer;
   private metrics: MetricsCollector;
@@ -125,7 +125,6 @@ export class CycleArbitrage {
     }
 
     // Initialize pool matrix builder and path finder
-    this.factory = new ethers.Contract(CONSTANTS.PANCAKE_V3_FACTORY, CONSTANTS.FACTORY_ABI, this.provider);
     this.poolMatrixBuilder = new PoolMatrixBuilder(provider);
     this.pathFinder = new PathFinder();
 
@@ -253,7 +252,7 @@ export class CycleArbitrage {
       cycle.poolAddresses = [];
 
       for (let i = 0; i < cycle.tokens.length - 1; i++) {
-        const poolAddress = await this.getPoolAddress(
+        const poolAddress = this.getPoolAddress(
           cycle.addresses[i],
           cycle.addresses[i + 1],
           cycle.fees[i]
@@ -410,25 +409,18 @@ export class CycleArbitrage {
 
 
   /**
-   * Get pool address from factory
+   * Get pool address using off-chain CREATE2 computation (no on-chain call)
+   * This is much faster than calling factory.getPool() on-chain
+   * 
+   * Note: This computes the address but doesn't verify the pool exists.
+   * The address will be valid if the pool has been deployed.
    */
-  private async getPoolAddress(
+  private getPoolAddress(
     token0: string,
     token1: string,
     fee: number
-  ): Promise<string> {
-    // Sort tokens (Uniswap V3 requirement)
-    const [t0, t1] = [token0, token1].sort((a, b) =>
-      a.toLowerCase().localeCompare(b.toLowerCase())
-    );
-
-    const poolAddress = await this.factory.getPool(t0, t1, fee);
-
-    if (poolAddress === ethers.ZeroAddress) {
-      throw new Error(`Pool not found for ${token0}/${token1} with fee ${fee}`);
-    }
-
-    return poolAddress;
+  ): string {
+    return computePoolAddress(token0, token1, fee);
   }
 
 

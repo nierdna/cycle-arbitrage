@@ -4,10 +4,62 @@
  */
 
 import { ethers } from 'ethers';
-import { PANCAKE_V3_FACTORY, FACTORY_ABI } from '../constants.js';
+import { PANCAKE_V3_FACTORY, PANCAKE_V3_POOL_DEPLOYER, V3_INIT_CODE_HASH, FACTORY_ABI } from '../constants.js';
 
 /**
- * Get pool address from token0, token1, and fee
+ * Compute pool address off-chain using CREATE2 (no on-chain call)
+ * Based on PancakeSwap V3 PoolDeployer logic
+ * 
+ * @param token0 - First token address (will be sorted)
+ * @param token1 - Second token address (will be sorted)
+ * @param fee - Fee tier in bps (100, 500, 2500, 10000)
+ * @returns Computed pool address (may not exist if pool hasn't been deployed)
+ */
+export function computePoolAddress(
+  token0: string,
+  token1: string,
+  fee: number
+): string {
+  // Sort tokens (token0 < token1) - compare addresses as uint160 (BigInt)
+  const addr0 = BigInt(token0);
+  const addr1 = BigInt(token1);
+  const [t0, t1] = addr0 < addr1 ? [token0, token1] : [token1, token0];
+
+  // Ensure token0 < token1 (as required by CREATE2 salt)
+  if (BigInt(t0) >= BigInt(t1)) {
+    throw new Error('Invalid token pair: token0 must be less than token1');
+  }
+
+  // Compute salt: keccak256(abi.encode(token0, token1, fee))
+  const salt = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['address', 'address', 'uint24'],
+      [t0, t1, fee]
+    )
+  );
+
+  // Compute CREATE2 address:
+  // address = keccak256(0xff || deployer || salt || initCodeHash)[12:]
+  const initCodeHash = V3_INIT_CODE_HASH;
+  const deployer = PANCAKE_V3_POOL_DEPLOYER;
+
+  const create2Input = ethers.concat([
+    '0xff',
+    deployer,
+    salt,
+    initCodeHash,
+  ]);
+
+  const hash = ethers.keccak256(create2Input);
+
+  // Take last 20 bytes (40 hex chars) as address
+  // Convert to checksum address
+  const address = '0x' + hash.slice(-40);
+  return ethers.getAddress(address);
+}
+
+/**
+ * Get pool address from token0, token1, and fee (on-chain call)
  * 
  * @param provider - Ethers provider (JsonRpcProvider, etc.)
  * @param token0 - First token address
@@ -36,6 +88,23 @@ export async function getPoolAddress(
   // Get pool address
   const poolAddress = await factory.getPool(t0, t1, fee);
   return poolAddress;
+}
+
+/**
+ * Get pool address using off-chain computation (faster, no RPC call)
+ * Falls back to on-chain call if pool might not exist
+ * 
+ * @param token0 - First token address
+ * @param token1 - Second token address
+ * @param fee - Fee tier in bps (100, 500, 2500, 10000)
+ * @returns Computed pool address
+ */
+export function getPoolAddressOffChain(
+  token0: string,
+  token1: string,
+  fee: number
+): string {
+  return computePoolAddress(token0, token1, fee);
 }
 
 /**
