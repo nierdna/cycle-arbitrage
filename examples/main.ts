@@ -42,7 +42,7 @@ async function main() {
     'USDT',
     {
       minAmountIn: BigInt(1e10), // 0.0001 USDT
-      maxAmountIn: BigInt(1e19), // 10 USDT
+      maxAmountIn: BigInt(1e20), // 10 USDT
     }
   ));
 
@@ -58,7 +58,17 @@ async function main() {
   // Note: All tokens must have amountConfig. Cycles starting from tokens without config will be skipped.
   // tokenRegistry.addToken(new Token(TOKENS.ASTER, 'ASTER', {
   //   minAmountIn: BigInt(1e10),
-  //   maxAmountIn: BigInt(1e19),
+  //   maxAmountIn: BigInt(1e20),
+  // }));
+
+  // tokenRegistry.addToken(new Token(TOKENS.KOGE, 'KOGE', {
+  //   minAmountIn: BigInt(1e10),
+  //   maxAmountIn: BigInt(1e20),
+  // }));
+
+  // tokenRegistry.addToken(new Token(TOKENS.ETH, 'ETH', {
+  //   minAmountIn: BigInt(1e10),
+  //   maxAmountIn: BigInt(1e20),
   // }));
 
   // Create arbitrage instance with auto-discovery mode
@@ -72,8 +82,8 @@ async function main() {
     optimizationInterval: 100, // Re-optimize every 100 scans
     optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
     dashboardPort: 8080, // Enable HTTP dashboard on port 8080
-    discoveryFees: [100, 500],
-    // discoveryFees: [100, 500, 2500, 10000],
+    // discoveryFees: [100, 500],
+    discoveryFees: [100, 500, 2500, 10000],
   });
 
   // Optional: Set execution with arbitrage contract (bundle mode only)
