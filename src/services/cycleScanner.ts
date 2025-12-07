@@ -32,6 +32,7 @@ export class CycleScanner extends EventEmitter {
   private currentAmountIn: bigint;
   private optimalAmountIn: bigint;
   private optimalArbBps = 0;
+  private isRunning: boolean = false;
 
   constructor(
     private cycleId: string,
@@ -51,24 +52,65 @@ export class CycleScanner extends EventEmitter {
    * Start scanning cycle continuously
    */
   async start(): Promise<void> {
+    if (this.isRunning) {
+      this.logger?.warn(`[${this.cycleId}] Scanner is already running`);
+      return;
+    }
+
+    this.isRunning = true;
     const minAmountIn = this.cycle.minAmountIn;
     const maxAmountIn = this.cycle.maxAmountIn;
 
     // Initial optimization if enabled
-    if (this.options.optimizeAmountIn && this.amountOptimizer) {
-      await this.performInitialOptimization(minAmountIn, maxAmountIn);
+    if (this.options.optimizeAmountIn && this.amountOptimizer && this.isRunning) {
+      try {
+        await this.performInitialOptimization(minAmountIn, maxAmountIn);
+      } catch (error) {
+        this.logger?.error(`[${this.cycleId}] Initial optimization failed:`, error);
+      }
     }
 
     // Continuous scanning loop
-    while (true) {
+    while (this.isRunning) {
       try {
         await this.performScan(minAmountIn, maxAmountIn);
-        await this.sleep(this.options.scanIntervalMs);
+        
+        // Check if still running before sleeping
+        if (this.isRunning) {
+          await this.sleep(this.options.scanIntervalMs);
+        }
       } catch (error) {
         this.logger?.error(`[${this.cycleId}] Scan error:`, error);
-        await this.sleep(5000);
+        
+        // Only sleep if still running
+        if (this.isRunning) {
+          await this.sleep(5000);
+        }
       }
     }
+
+    this.logger?.info(`[${this.cycleId}] Scanner stopped`);
+  }
+
+  /**
+   * Stop scanning gracefully
+   */
+  stop(): void {
+    if (!this.isRunning) {
+      this.logger?.warn(`[${this.cycleId}] Scanner is not running`);
+      return;
+    }
+
+    this.logger?.info(`[${this.cycleId}] Stopping scanner...`);
+    this.isRunning = false;
+    this.emit('stopped', { cycleId: this.cycleId });
+  }
+
+  /**
+   * Check if scanner is running
+   */
+  get running(): boolean {
+    return this.isRunning;
   }
 
   /**

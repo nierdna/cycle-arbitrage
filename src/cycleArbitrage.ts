@@ -13,6 +13,7 @@ import { MetricsCollector } from './monitoring/metrics.js';
 import { DashboardServer } from './monitoring/dashboard.js';
 import { PoolMatrixBuilder } from './poolMatrix/poolMatrixBuilder.js';
 import { PathFinder } from './poolMatrix/pathFinder.js';
+import { PoolAddressResolver } from './poolMatrix/poolAddressResolver.js';
 import { TokenRegistry } from './tokens/tokenRegistry.js';
 import {
   CycleDiscoveryService,
@@ -22,7 +23,7 @@ import {
   BundleConfig,
   ArbitrageContractConfig,
 } from './services/index.js';
-import { computePoolAddress } from './utils/poolHelper.js';
+import { CycleEstimator } from './estimation/cycleEstimator.js';
 
 export interface TokenAmountConfig {
   minAmountIn: bigint;
@@ -63,7 +64,6 @@ export interface ArbitrageOptions {
  * Cycle Arbitrage - Auto-Discovery Mode
  */
 export class CycleArbitrage {
-  private provider: ethers.Provider;
   private stateFetcher: StateFetcher;
   private quoter: QuoterV3;
   private logger: winston.Logger;
@@ -77,7 +77,13 @@ export class CycleArbitrage {
   private formatter: CycleFormatter;
   private tradeExecutor?: TradeExecutor;
 
+  // Separated components following SRP
+  private cycleEstimator: CycleEstimator;
+  private poolAddressResolver: PoolAddressResolver;
+
   private cycles: Map<string, CycleWithState> = new Map();
+  private scanners: Map<string, CycleScanner> = new Map(); // Track active scanners for cleanup
+  private isRunning: boolean = false; // Track if scanning is active
   private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
@@ -95,7 +101,6 @@ export class CycleArbitrage {
     tokenRegistry: TokenRegistry,
     options: ArbitrageOptions = {}
   ) {
-    this.provider = provider;
     this.tokenRegistry = tokenRegistry;
     this.options = {
       minArbitrageBps: options.minArbitrageBps ?? 2,
@@ -152,10 +157,22 @@ export class CycleArbitrage {
 
     this.quoter = new QuoterV3(this.stateFetcher);
 
+    // Initialize separated components
+    this.poolAddressResolver = new PoolAddressResolver(this.logger, this.formatter);
+
+    // CycleEstimator will be initialized after cycles are discovered
+    // We need to create a placeholder first, then update it in initialize()
+    this.cycleEstimator = new CycleEstimator(
+      this.stateFetcher,
+      this.quoter,
+      this.cycles,
+      this.logger
+    );
+
     // Initialize AmountOptimizer if optimization is enabled
     if (this.options.optimizeAmountIn) {
       this.amountOptimizer = new AmountOptimizer(
-        (cycleId: string, amountIn: bigint) => this.calculateArbitrageBps(cycleId, amountIn)
+        (cycleId: string, amountIn: bigint) => this.cycleEstimator.calculateArbitrageBps(cycleId, amountIn)
       );
     }
   }
@@ -187,19 +204,6 @@ export class CycleArbitrage {
     return cyclesWithAmounts;
   }
 
-  /**
-   * Calculate arbitrage BPS for a given amountIn
-   * Used by AmountOptimizer
-   */
-  private async calculateArbitrageBps(
-    cycleId: string,
-    amountIn: bigint
-  ): Promise<number> {
-    const amountOut = await this.estimateAmountOutForCycle(cycleId, amountIn);
-    return Number(
-      ((amountOut - amountIn) * BigInt(1e4)) / amountIn
-    );
-  }
 
 
   /**
@@ -251,23 +255,8 @@ export class CycleArbitrage {
 
     this.logger.info(`Total cycles: ${this.cycles.size}`);
 
-    // Fetch pool addresses for all cycles
-    this.logger.info('Fetching pool addresses...');
-    for (const [cycleId, cycle] of this.cycles.entries()) {
-      const tokensPath = this.formatter.formatCyclePath(cycle.tokens);
-      this.logger.info(`Cycle: ${tokensPath} (${cycleId})`);
-      cycle.poolAddresses = [];
-
-      for (let i = 0; i < cycle.tokens.length - 1; i++) {
-        const poolAddress = this.getPoolAddress(
-          cycle.addresses[i],
-          cycle.addresses[i + 1],
-          cycle.fees[i]
-        );
-        cycle.poolAddresses.push(poolAddress);
-        this.logger.info(`  Pool ${i + 1}: ${poolAddress}`);
-      }
-    }
+    // Resolve pool addresses for all cycles using PoolAddressResolver
+    this.poolAddressResolver.resolveAllPoolAddresses(this.cycles);
 
     // Fetch initial pool states (deduplicate pool addresses)
     this.logger.info('Fetching initial pool states...');
@@ -293,37 +282,11 @@ export class CycleArbitrage {
 
   /**
    * Estimate amount out for a specific cycle (multi-hop)
+   * Delegates to CycleEstimator
    * Fee is already handled by QuoterV3 internally
    */
   async estimateAmountOutForCycle(cycleId: string, amountIn: bigint): Promise<bigint> {
-    const cycle = this.cycles.get(cycleId);
-    if (!cycle) {
-      throw new Error(`Cycle not found: ${cycleId}`);
-    }
-
-    let amountOut = amountIn;
-
-    // Iterate through each hop
-    for (let i = 0; i < cycle.tokens.length - 1; i++) {
-      const poolAddress = cycle.poolAddresses[i];
-      const tokenIn = cycle.addresses[i];
-
-      // Get pool state from cache (sync - already fetched in initialize)
-      const poolState = this.stateFetcher.getPoolState(poolAddress);
-      if (!poolState) {
-        throw new Error(`Pool state not found in cache: ${poolAddress}. Make sure initialize() was called.`);
-      }
-      const zeroForOne = poolState.token0.toLowerCase() === tokenIn.toLowerCase();
-
-      // Quote single hop (fee handled internally by QuoterV3)
-      amountOut = await this.quoter.quoteExactInputSingle(
-        poolAddress,
-        zeroForOne,
-        amountOut
-      );
-    }
-
-    return amountOut;
+    return this.cycleEstimator.estimateAmountOutForCycle(cycleId, amountIn);
   }
 
 
@@ -332,7 +295,10 @@ export class CycleArbitrage {
    */
   private async scanCycle(cycleId: string): Promise<void> {
     const cycle = this.cycles.get(cycleId);
-    if (!cycle) return;
+    if (!cycle) {
+      this.logger.warn(`Cycle ${cycleId} not found, skipping scan`);
+      return;
+    }
 
     const scanner = new CycleScanner(
       cycleId,
@@ -351,6 +317,9 @@ export class CycleArbitrage {
       this.formatter
     );
 
+    // Track scanner for cleanup
+    this.scanners.set(cycleId, scanner);
+
     // Subscribe to CycleScanner events
     scanner.on('scan', (data) => {
       this.metrics.recordScan(data.cycleId);
@@ -362,25 +331,66 @@ export class CycleArbitrage {
 
       // Execute trade if tradeExecutor is set
       if (this.tradeExecutor) {
-        const executeAmount =
-          this.options.optimizeAmountIn &&
+        try {
+          // Determine which amount to use (optimized or default)
+          let executeAmount: bigint;
+          let executeAmountOut: bigint;
+
+          if (
+            this.options.optimizeAmountIn &&
             data.optimalArbBps &&
-            data.optimalArbBps > data.arbitrageBps
-            ? data.optimalAmountIn!
-            : data.amountIn;
+            data.optimalArbBps > data.arbitrageBps &&
+            data.optimalAmountIn
+          ) {
+            // Use optimized amount if available and better
+            executeAmount = data.optimalAmountIn;
 
-        // Lấy từ data, không estimate lại
-        const executeAmountOut =
-          executeAmount === data.amountIn
-            ? data.amountOut
-            : data.optimalAmountOut!;
+            // Validate optimalAmountOut exists
+            if (!data.optimalAmountOut) {
+              this.logger.warn(
+                `[${data.cycleId}] optimalAmountOut not available for optimalAmountIn, ` +
+                `falling back to default amount. This may indicate a timing issue.`
+              );
+              // Fallback to default amount
+              executeAmount = data.amountIn;
+              executeAmountOut = data.amountOut;
+            } else {
+              executeAmountOut = data.optimalAmountOut;
+            }
+          } else {
+            // Use default amount
+            executeAmount = data.amountIn;
+            executeAmountOut = data.amountOut;
+          }
 
-        await this.tradeExecutor.executeCycle(
-          cycleId,
-          cycle,
-          executeAmount,
-          executeAmountOut
-        );
+          // Validate amounts before execution
+          if (executeAmount <= 0n) {
+            this.logger.error(
+              `[${data.cycleId}] Invalid executeAmount: ${executeAmount}. Skipping execution.`
+            );
+            return;
+          }
+
+          if (executeAmountOut <= 0n) {
+            this.logger.error(
+              `[${data.cycleId}] Invalid executeAmountOut: ${executeAmountOut}. Skipping execution.`
+            );
+            return;
+          }
+
+          await this.tradeExecutor.executeCycle(
+            data.cycleId,
+            cycle,
+            executeAmount,
+            executeAmountOut
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `[${data.cycleId}] Failed to execute trade:`,
+            error instanceof Error ? error.message : String(error)
+          );
+          // Don't throw - allow scanning to continue
+        }
       }
     });
 
@@ -399,35 +409,101 @@ export class CycleArbitrage {
    * Scan all cycles in parallel
    */
   async scan(): Promise<void> {
+    if (this.isRunning) {
+      this.logger.warn('Scan is already running. Call stop() first if you want to restart.');
+      return;
+    }
+
+    this.isRunning = true;
     this.logger.info('Starting arbitrage scan...');
     this.logger.info(`  Min arbitrage: ${this.options.minArbitrageBps} bps`);
     this.logger.info(`  Scan interval: ${this.options.scanIntervalMs}ms`);
     this.logger.info(`  Test amount: ${ethers.formatEther(this.options.amountIn)} tokens`);
     this.logger.info(`  Cycles: ${this.cycles.size}`);
 
-    // Start scanning each cycle in parallel
-    const scanTasks = Array.from(this.cycles.keys()).map((cycleId) =>
-      this.scanCycle(cycleId)
-    );
+    try {
+      // Start scanning each cycle in parallel
+      const scanTasks = Array.from(this.cycles.keys()).map((cycleId) =>
+        this.scanCycle(cycleId).catch((error) => {
+          this.logger.error(`[${cycleId}] Scanner error:`, error);
+          // Continue with other scanners even if one fails
+        })
+      );
 
-    // Wait for all tasks (they run forever, so this never resolves)
-    await Promise.all(scanTasks);
+      // Wait for all tasks (they run forever, so this never resolves unless stopped)
+      await Promise.all(scanTasks);
+    } catch (error) {
+      this.isRunning = false;
+      throw error;
+    }
   }
 
-
   /**
-   * Get pool address using off-chain CREATE2 computation (no on-chain call)
-   * This is much faster than calling factory.getPool() on-chain
-   * 
-   * Note: This computes the address but doesn't verify the pool exists.
-   * The address will be valid if the pool has been deployed.
+   * Stop scanning and cleanup all resources
+   * Gracefully shuts down scanners, WebSocket, dashboard, and metrics
    */
-  private getPoolAddress(
-    token0: string,
-    token1: string,
-    fee: number
-  ): string {
-    return computePoolAddress(token0, token1, fee);
+  async stop(): Promise<void> {
+    if (!this.isRunning) {
+      this.logger.warn('Scan is not running. Nothing to stop.');
+      return;
+    }
+
+    this.logger.info('Stopping Cycle Arbitrage...');
+    this.isRunning = false;
+
+    try {
+      // Stop all scanners
+      this.logger.info(`Stopping ${this.scanners.size} scanner(s)...`);
+      for (const [cycleId, scanner] of this.scanners.entries()) {
+        try {
+          if (scanner && typeof scanner.stop === 'function') {
+            await scanner.stop();
+            this.logger.debug(`Scanner ${cycleId} stopped`);
+          }
+        } catch (error: any) {
+          this.logger.warn(`Error stopping scanner ${cycleId}:`, error?.message || String(error));
+        }
+      }
+      this.scanners.clear();
+
+      // Stop WebSocket if configured
+      if (this.options.wssUrl && this.stateFetcher) {
+        try {
+          // Check if StateFetcher has stopWebSocket method
+          if (typeof (this.stateFetcher as any).stopWebSocket === 'function') {
+            await (this.stateFetcher as any).stopWebSocket();
+            this.logger.info('WebSocket connection closed');
+          } else {
+            this.logger.debug('StateFetcher does not have stopWebSocket method, skipping');
+          }
+        } catch (error: any) {
+          this.logger.warn('Error closing WebSocket:', error?.message || String(error));
+        }
+      }
+
+      // Stop dashboard if running
+      if (this.dashboard) {
+        try {
+          this.dashboard.stop();
+          this.logger.info('Dashboard stopped');
+        } catch (error: any) {
+          this.logger.warn('Error stopping dashboard:', error?.message || String(error));
+        }
+      }
+
+      // Stop metrics (flush data)
+      try {
+        this.metrics.stop();
+        this.logger.info('Metrics collector stopped (data flushed)');
+      } catch (error: any) {
+        this.logger.warn('Error stopping metrics:', error?.message || String(error));
+      }
+
+      this.logger.info('✓ Cycle Arbitrage stopped successfully');
+    } catch (error: any) {
+      this.logger.error('Error during shutdown:', error?.message || String(error));
+      throw error;
+    }
   }
 
 
