@@ -7,6 +7,7 @@ import { ethers } from 'ethers';
 import { USDT_ADDRESS, ERC20_ABI, MIN_POOL_LIQUIDITY_USD } from '../constants.js';
 import { computePoolAddress, sortTokens } from './poolHelper.js';
 import { DecimalCache } from '../tokens/decimalCache.js';
+import { RateLimiter } from './rateLimiter.js';
 
 /**
  * Price cache for tokens (to avoid repeated price lookups)
@@ -19,6 +20,9 @@ interface PriceCache {
 
 const PRICE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const priceCache: Map<string, PriceCache> = new Map();
+
+// Rate limiter for RPC calls (max 100 requests/second: 50 concurrent with 10ms delay)
+const rateLimiter = new RateLimiter(50, 10);
 
 /**
  * Find USDT-Token pool address with fallback fees
@@ -37,9 +41,9 @@ async function findUSDTPricePool(
   for (const fee of feesToTry) {
     const poolAddress = computePoolAddress(USDT_ADDRESS, tokenAddress, fee);
     
-    // Check if pool exists
+    // Check if pool exists (with rate limiting)
     try {
-      const code = await provider.getCode(poolAddress);
+      const code = await rateLimiter.execute(() => provider.getCode(poolAddress));
       if (code !== '0x' && code.length > 2) {
         return poolAddress;
       }
@@ -95,13 +99,13 @@ export async function getTokenPriceInUSDT(
     const usdtAddress = t0.toLowerCase() === usdtLower ? t0 : t1;
     const otherTokenAddress = t0.toLowerCase() === usdtLower ? t1 : t0;
 
-    // Get balances
+    // Get balances (with rate limiting)
     const usdtContract = new ethers.Contract(usdtAddress, ERC20_ABI, provider);
     const tokenContract = new ethers.Contract(otherTokenAddress, ERC20_ABI, provider);
     
     const [usdtBalance, tokenBalance] = await Promise.all([
-      usdtContract.balanceOf(poolAddress),
-      tokenContract.balanceOf(poolAddress),
+      rateLimiter.execute(() => usdtContract.balanceOf(poolAddress)),
+      rateLimiter.execute(() => tokenContract.balanceOf(poolAddress)),
     ]);
 
     // Get decimals
@@ -165,13 +169,13 @@ export async function checkPoolLiquidity(
     // Ensure tokens are sorted (defensive)
     const [t0, t1] = sortTokens(token0, token1);
 
-    // Get balances
+    // Get balances (with rate limiting)
     const token0Contract = new ethers.Contract(t0, ERC20_ABI, provider);
     const token1Contract = new ethers.Contract(t1, ERC20_ABI, provider);
     
     const [balance0, balance1] = await Promise.all([
-      token0Contract.balanceOf(poolAddress),
-      token1Contract.balanceOf(poolAddress),
+      rateLimiter.execute(() => token0Contract.balanceOf(poolAddress)),
+      rateLimiter.execute(() => token1Contract.balanceOf(poolAddress)),
     ]);
 
     // Get decimals

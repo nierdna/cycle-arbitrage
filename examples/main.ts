@@ -22,7 +22,8 @@ const TOKENS = {
   WBNB: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
   ASTER: '0x000Ae314E2A2172a039B26378814C252734f556A',
   ETH: "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
-  KOGE: "0xe6DF05CE8C8301223373CF5B969AFCb1498c5528"
+  KOGE: "0xe6DF05CE8C8301223373CF5B969AFCb1498c5528",
+  USDC: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
 };
 
 async function main() {
@@ -49,6 +50,14 @@ async function main() {
       maxAmountIn: BigInt(1e20), // 10 USDT
     }
   ));
+  // tokenRegistry.addToken(new Token(
+  //   TOKENS.USDC,
+  //   'USDC',
+  //   {
+  //     minAmountIn: BigInt(1e10), // 0.0001 USDC
+  //     maxAmountIn: BigInt(1e20), // 10 USDC
+  //   }
+  // ));
 
   tokenRegistry.addToken(new Token(
     TOKENS.WBNB,

@@ -10,11 +10,13 @@ import { checkPoolLiquidity } from '../utils/poolLiquidityHelper.js';
 import { TokenRegistry } from '../tokens/tokenRegistry.js';
 import { MIN_POOL_LIQUIDITY_USD } from '../constants.js';
 import { PoolExistenceCache } from './poolExistenceCache.js';
+import { RateLimiter } from '../utils/rateLimiter.js';
 
 export class PoolMatrixBuilder {
   private provider?: ethers.Provider;
   private tokenRegistry?: TokenRegistry;
   private existenceCache: PoolExistenceCache;
+  private rateLimiter: RateLimiter;
 
   constructor(provider?: ethers.Provider, tokenRegistry?: TokenRegistry) {
     // Provider is optional - only needed if we want to check pool existence/liquidity
@@ -23,6 +25,8 @@ export class PoolMatrixBuilder {
     this.tokenRegistry = tokenRegistry;
     // Initialize pool existence cache
     this.existenceCache = new PoolExistenceCache();
+    // Rate limiter for RPC calls (max 100 requests/second: 50 concurrent with 10ms delay)
+    this.rateLimiter = new RateLimiter(50, 10);
   }
 
   /**
@@ -69,9 +73,9 @@ export class PoolMatrixBuilder {
         // Use cached value
         exists = cachedExists;
       } else {
-      // Not in cache, fetch from chain
+        // Not in cache, fetch from chain (with rate limiting)
         try {
-          const code = await this.provider.getCode(poolAddress);
+          const code = await this.rateLimiter.execute(() => this.provider!.getCode(poolAddress));
           exists = code !== '0x' && code.length > 2; // Non-empty code means contract exists
 
           // Save to cache (async, don't wait)
@@ -142,15 +146,34 @@ export class PoolMatrixBuilder {
       }
     }
 
-    // Try all fees for each pair (parallel)
-    const poolPromises: Promise<PoolInfo>[] = [];
+    // Try all fees for each pair (with batch processing to avoid rate limit)
+    // Generate all pool tasks first
+    const poolTasks: Array<[string, string, number]> = [];
     for (const [token0, token1] of pairs) {
       for (const fee of fees) {
-        poolPromises.push(this.findPool(token0, token1, fee));
+        poolTasks.push([token0, token1, fee]);
       }
     }
 
-    const poolResults = await Promise.all(poolPromises);
+    // Process in batches to avoid overwhelming RPC provider
+    const BATCH_SIZE = 5; // Process 15 pools at a time
+    const BATCH_DELAY_MS = 1000; // 100ms delay between batches
+    const poolResults: PoolInfo[] = [];
+
+    for (let i = 0; i < poolTasks.length; i += BATCH_SIZE) {
+      const batch = poolTasks.slice(i, i + BATCH_SIZE);
+      // Create and execute promises for this batch only
+      const batchPromises = batch.map(([token0, token1, fee]) =>
+        this.findPool(token0, token1, fee)
+      );
+      const batchResults = await Promise.all(batchPromises);
+      poolResults.push(...batchResults);
+
+      // Add delay between batches (except for the last batch)
+      if (i + BATCH_SIZE < poolTasks.length) {
+        await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+      }
+    }
 
     // Store pools with key: token0-token1-fee and count filtered pools
     let filteredCount = 0;
