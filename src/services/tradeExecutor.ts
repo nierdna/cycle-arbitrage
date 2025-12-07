@@ -184,7 +184,7 @@ export class TradeExecutor extends EventEmitter {
       }
 
       // Get gas price
-      const maxPriorityFeePerGas = ethers.parseUnits("2", "gwei");
+      const maxPriorityFeePerGas = (await this.wallet.provider?.getFeeData())?.gasPrice || ethers.parseUnits("0.05", "gwei");
       const maxFeePerGas = ethers.parseUnits("3", "gwei");
 
       // Estimate gas limit based on pool count

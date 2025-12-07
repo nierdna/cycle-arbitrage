@@ -57,7 +57,7 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
 
     // Bundle config (same as script)
     bundleConfig = {
-      rpcUrl: 'https://rpc.48.club',
+      rpcUrl: 'https://cosmopolitan-sparkling-arrow.bsc.quiknode.pro/833002b5d68ae8582e9d5bb74ac381a52ec5add5/',
       apiUrl: 'https://puissant-builder.48.club/',
       maxBlocks: 50,
       maxSeconds: 120,
