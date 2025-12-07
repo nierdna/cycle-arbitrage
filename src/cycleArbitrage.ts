@@ -125,7 +125,8 @@ export class CycleArbitrage {
     }
 
     // Initialize pool matrix builder and path finder
-    this.poolMatrixBuilder = new PoolMatrixBuilder(provider);
+    // Pass tokenRegistry to PoolMatrixBuilder for liquidity checks
+    this.poolMatrixBuilder = new PoolMatrixBuilder(provider, this.tokenRegistry);
     this.pathFinder = new PathFinder();
 
     // Initialize services
@@ -236,6 +237,9 @@ export class CycleArbitrage {
    */
   async initialize(): Promise<void> {
     this.logger.info('=== Cycle Arbitrage ===');
+
+    // Initialize token registry (load decimal cache from file)
+    await this.tokenRegistry.initialize();
 
     // Discover cycles if not already discovered
     if (this.cycles.size === 0) {

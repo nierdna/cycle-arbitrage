@@ -2,11 +2,25 @@
  * Token Registry - Manages token collection
  */
 
+import { ethers } from 'ethers';
 import { Token } from './token.js';
 import { TokenAmountConfig } from '../cycleArbitrage.js';
+import { DecimalCache } from './decimalCache.js';
 
 export class TokenRegistry {
   private tokens: Map<string, Token> = new Map();
+  private decimalCache: DecimalCache;
+
+  constructor(provider?: ethers.Provider) {
+    this.decimalCache = new DecimalCache(provider);
+  }
+
+  /**
+   * Initialize decimal cache (load from file)
+   */
+  async initialize(): Promise<void> {
+    await this.decimalCache.load();
+  }
 
   /**
    * Add a single token to registry
@@ -69,6 +83,27 @@ export class TokenRegistry {
    */
   hasToken(address: string): boolean {
     return this.tokens.has(address.toLowerCase());
+  }
+
+  /**
+   * Get token decimals (cached with file persistence)
+   */
+  async getDecimals(tokenAddress: string): Promise<number> {
+    return await this.decimalCache.getDecimals(tokenAddress);
+  }
+
+  /**
+   * Set token decimals manually
+   */
+  async setDecimals(tokenAddress: string, decimals: number): Promise<void> {
+    await this.decimalCache.setDecimals(tokenAddress, decimals);
+  }
+
+  /**
+   * Get decimal cache instance (for direct access if needed)
+   */
+  getDecimalCache(): DecimalCache {
+    return this.decimalCache;
   }
 }
 

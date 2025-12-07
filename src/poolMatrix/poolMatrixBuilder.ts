@@ -6,13 +6,19 @@
 import { ethers } from 'ethers';
 import { PoolInfo, PoolMatrix } from './types.js';
 import { computePoolAddress, sortTokens } from '../utils/poolHelper.js';
+import { checkPoolLiquidity } from '../utils/poolLiquidityHelper.js';
+import { TokenRegistry } from '../tokens/tokenRegistry.js';
+import { MIN_POOL_LIQUIDITY_USD } from '../constants.js';
 
 export class PoolMatrixBuilder {
   private provider?: ethers.Provider;
+  private tokenRegistry?: TokenRegistry;
 
-  constructor(provider?: ethers.Provider) {
-    // Provider is optional - only needed if we want to check pool existence
+  constructor(provider?: ethers.Provider, tokenRegistry?: TokenRegistry) {
+  // Provider is optional - only needed if we want to check pool existence/liquidity
     this.provider = provider;
+    // TokenRegistry is optional - needed for liquidity checks (decimal cache)
+    this.tokenRegistry = tokenRegistry;
   }
 
   /**
@@ -50,6 +56,37 @@ export class PoolMatrixBuilder {
       } catch (error) {
         // If check fails, assume pool exists (will be validated later)
         exists = true;
+      }
+    }
+
+    // Check liquidity if provider and tokenRegistry are available
+    // Skip pools with liquidity < $1000
+    if (exists && this.provider && this.tokenRegistry) {
+      try {
+        const decimalCache = this.tokenRegistry.getDecimalCache();
+        const liquidityResult = await checkPoolLiquidity(
+          this.provider,
+          poolAddress,
+          t0,  // Pass token0 (already sorted)
+          t1,  // Pass token1 (already sorted)
+          decimalCache
+        );
+
+        // If pool doesn't have enough liquidity, mark as not existing
+        if (!liquidityResult.hasEnoughLiquidity) {
+          exists = false;
+          // Log pool filtered due to insufficient liquidity
+          const liquidityMsg = liquidityResult.liquidityUSD !== undefined
+            ? ` (liquidity: $${liquidityResult.liquidityUSD.toFixed(2)})`
+            : '';
+          console.warn(
+            `Pool filtered: ${t0.slice(0, 6)}...${t0.slice(-4)}-${t1.slice(0, 6)}...${t1.slice(-4)}, ` +
+            `fee: ${fee} bps, address: ${poolAddress}${liquidityMsg} < $${MIN_POOL_LIQUIDITY_USD}`
+          );
+        }
+      } catch (error) {
+        // If liquidity check fails, assume pool is OK (skip filter)
+        // Error is already logged in checkPoolLiquidity
       }
     }
 
@@ -91,12 +128,20 @@ export class PoolMatrixBuilder {
 
     const poolResults = await Promise.all(poolPromises);
 
-    // Store pools with key: token0-token1-fee
+    // Store pools with key: token0-token1-fee and count filtered pools
+    let filteredCount = 0;
     for (const poolInfo of poolResults) {
       if (poolInfo.exists) {
         const key = this.getPoolKey(poolInfo.token0, poolInfo.token1, poolInfo.fee);
         pools.set(key, poolInfo);
+      } else {
+        filteredCount++;
       }
+    }
+
+    // Log summary of filtered pools
+    if (filteredCount > 0) {
+      console.info(`Pool matrix summary: ${pools.size} pools found, ${filteredCount} pools filtered (liquidity < $${MIN_POOL_LIQUIDITY_USD})`);
     }
 
     return {

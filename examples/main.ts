@@ -34,7 +34,11 @@ async function main() {
   console.log(`RPC: ${rpcUrl}\n`);
 
   // Create token registry with tokens and their configs
-  const tokenRegistry = new TokenRegistry();
+  // Pass provider for decimal cache and liquidity checks
+  const tokenRegistry = new TokenRegistry(provider);
+
+  // Initialize decimal cache (load from file if exists)
+  await tokenRegistry.initialize();
 
   // Add tokens with name and amount config
   tokenRegistry.addToken(new Token(
