@@ -26,6 +26,11 @@ export interface HistoricalDataPoint {
   cycleId: string;
   arbitrageBps: number | null; // from opportunity (aggregated by second)
   bestAmountInArbBps: number | null; // from optimization
+  // Execution data (optional, only present for execution events)
+  executionProfit?: bigint | string; // Profit from execution (bigint serialized as string)
+  executionTxHash?: string; // Transaction hash
+  executionAmountIn?: bigint | string; // Amount in (bigint serialized as string)
+  executionArbitrageBps?: number; // Arbitrage BPS for execution
 }
 
 export interface Metrics {
@@ -122,9 +127,24 @@ export class MetricsCollector {
 
   /**
    * Group historical data points by second (aggregate multiple points in same second)
+   * Note: Execution data points are NOT aggregated - each execution is a unique event
    */
   private groupHistoricalDataBySecond(points: HistoricalDataPoint[]): HistoricalDataPoint[] {
-    // Group by cycleId and second (timestamp rounded to second)
+    // Separate execution points (should not be aggregated)
+    const executionPoints: HistoricalDataPoint[] = [];
+    const nonExecutionPoints: HistoricalDataPoint[] = [];
+
+    for (const point of points) {
+      if (point.executionTxHash !== undefined || point.executionProfit !== undefined) {
+        // This is an execution point - keep it separate
+        executionPoints.push(point);
+      } else {
+        // This is a regular point (opportunity/optimization) - can be aggregated
+        nonExecutionPoints.push(point);
+      }
+    }
+
+    // Group non-execution points by cycleId and second (timestamp rounded to second)
     const grouped = new Map<string, {
       cycleId: string;
       second: number;
@@ -133,7 +153,7 @@ export class MetricsCollector {
       timestamps: number[];
     }>();
 
-    for (const point of points) {
+    for (const point of nonExecutionPoints) {
       const second = Math.floor(point.timestamp / 1000);
       const key = `${point.cycleId}-${second}`;
 
@@ -180,7 +200,9 @@ export class MetricsCollector {
       });
     }
 
-    return aggregated.sort((a, b) => a.timestamp - b.timestamp);
+    // Combine aggregated points with execution points (execution points are not aggregated)
+    const allPoints = [...aggregated, ...executionPoints];
+    return allPoints.sort((a, b) => a.timestamp - b.timestamp);
   }
 
   /**
@@ -312,7 +334,13 @@ export class MetricsCollector {
     buffer.timestamps.push(now);
   }
 
-  recordExecution(cycleId: string, profit: bigint): void {
+  recordExecution(
+    cycleId: string,
+    profit: bigint,
+    txHash?: string,
+    amountIn?: bigint,
+    arbitrageBps?: number
+  ): void {
     this.metrics.totalExecutions++;
     this.metrics.totalProfit += profit;
     const cycle = this.getOrCreateCycle(cycleId);
@@ -320,6 +348,18 @@ export class MetricsCollector {
     cycle.totalProfit += profit;
     cycle.lastExecution = Date.now();
     this.metrics.lastUpdate = Date.now();
+
+    // Save execution data point to file for historical tracking
+    this.addHistoricalDataPoint({
+      timestamp: Date.now(),
+      cycleId,
+      arbitrageBps: null, // Execution doesn't have arbitrageBps in the same way as opportunities
+      bestAmountInArbBps: null,
+      executionProfit: profit.toString(), // Serialize bigint as string for JSON
+      executionTxHash: txHash,
+      executionAmountIn: amountIn?.toString(), // Serialize bigint as string for JSON
+      executionArbitrageBps: arbitrageBps,
+    });
   }
 
   /**

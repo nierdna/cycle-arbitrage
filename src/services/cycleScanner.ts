@@ -64,7 +64,7 @@ export class CycleScanner extends EventEmitter {
     // Initial optimization if enabled
     if (this.options.optimizeAmountIn && this.amountOptimizer && this.isRunning) {
       try {
-        await this.performInitialOptimization(minAmountIn, maxAmountIn);
+      await this.performInitialOptimization(minAmountIn, maxAmountIn);
       } catch (error) {
         this.logger?.error(`[${this.cycleId}] Initial optimization failed:`, error);
       }
@@ -77,16 +77,16 @@ export class CycleScanner extends EventEmitter {
         
         // Check if still running before sleeping
         if (this.isRunning) {
-          await this.sleep(this.options.scanIntervalMs);
+        await this.sleep(this.options.scanIntervalMs);
         }
       } catch (error) {
         this.logger?.error(`[${this.cycleId}] Scan error:`, error);
         
         // Only sleep if still running
         if (this.isRunning) {
-          await this.sleep(5000);
-        }
+        await this.sleep(5000);
       }
+    }
     }
 
     this.logger?.info(`[${this.cycleId}] Scanner stopped`);

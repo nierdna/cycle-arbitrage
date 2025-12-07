@@ -281,18 +281,15 @@ export class TradeExecutor extends EventEmitter {
         `[${cycleId}] Estimated profit: ${ethers.formatEther(estimatedProfit)} tokens (${estimatedProfitBps.toFixed(2)} bps)`
       );
 
-      // Emit opportunity event
-      this.emit('opportunity', {
-        cycleId,
-        arbitrageBps: estimatedProfitBps,
-        amountIn,
-      });
-
-      // Emit execution event (bundle submitted successfully)
+      // Emit execution event (bundle submitted successfully) with full information
+      // Note: 'opportunity' event is already emitted from CycleScanner, no need to emit again here
       this.emit('execution', {
         cycleId,
         profit: estimatedProfit,
         txHash,
+        amountIn,
+        amountOut: estimatedOut,
+        arbitrageBps: estimatedProfitBps,
       });
 
       const totalTime = Date.now() - startTime;

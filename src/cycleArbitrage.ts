@@ -227,12 +227,17 @@ export class CycleArbitrage {
     );
 
     // Subscribe to TradeExecutor events
-    this.tradeExecutor.on('opportunity', (data) => {
-      this.metrics.recordOpportunity(data.cycleId, data.arbitrageBps, data.amountIn);
-    });
+    // Note: 'opportunity' event is emitted from CycleScanner, not from TradeExecutor
+    // So we don't need to subscribe here
 
     this.tradeExecutor.on('execution', (data) => {
-      this.metrics.recordExecution(data.cycleId, data.profit);
+      this.metrics.recordExecution(
+        data.cycleId,
+        data.profit,
+        data.txHash,
+        data.amountIn,
+        data.arbitrageBps
+      );
     });
   }
 
