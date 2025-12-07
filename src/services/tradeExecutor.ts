@@ -37,8 +37,9 @@ export interface ArbitrageContractConfig {
 export class TradeExecutor extends EventEmitter {
   private arbitrageContract: ethers.Contract;
   private contractAddress: string;
-  private executingCycles: Set<string> = new Set(); // Track cycles đang execute
+  private executingCycles: Map<string, number> = new Map(); // Track cycles với timestamp: cycleId -> timestamp
   private wallet: NonceCachedWallet; // Use NonceCachedWallet instead of ethers.Wallet
+  private readonly LOCK_DURATION_MS = 1000; // Lock duration: 1 second
 
   constructor(
     wallet: ethers.Wallet | NonceCachedWallet,
@@ -84,16 +85,28 @@ export class TradeExecutor extends EventEmitter {
     amountIn: bigint,
     estimatedOut: bigint
   ): Promise<string | undefined> {
-    // Check if cycle is already executing
-    if (this.executingCycles.has(cycleId)) {
+    const startTime = Date.now();
+    const now = Date.now();
+
+    // Cleanup old entries (older than lock duration)
+    for (const [id, timestamp] of this.executingCycles.entries()) {
+      if (now - timestamp > this.LOCK_DURATION_MS) {
+        this.executingCycles.delete(id);
+      }
+    }
+
+    // Check if cycle was executed recently (within lock duration)
+    const lastExecutionTime = this.executingCycles.get(cycleId);
+    if (lastExecutionTime !== undefined && (now - lastExecutionTime) <= this.LOCK_DURATION_MS) {
+      const timeSinceLastExecution = now - lastExecutionTime;
       this.logger.warn(
-        `[${cycleId}] Cycle is already executing. Skipping duplicate execution.`
+        `[${cycleId}] Cycle was executed ${timeSinceLastExecution}ms ago. Skipping duplicate execution (lock: ${this.LOCK_DURATION_MS}ms).`
       );
       return undefined;
     }
 
-    // Set lock
-    this.executingCycles.add(cycleId);
+    // Set lock with timestamp
+    this.executingCycles.set(cycleId, now);
 
     try {
       const poolCount = cycle.poolAddresses.length;
@@ -282,14 +295,19 @@ export class TradeExecutor extends EventEmitter {
         txHash,
       });
 
+      const totalTime = Date.now() - startTime;
+      this.logger.info(`[${cycleId}] ⏱️  Total execution time: ${totalTime}ms`);
+
       return txHash;
 
     } catch (error: any) {
-      this.logger.error(`[${cycleId}] ✗ Bundle submission failed:`, error.message || error);
+      const totalTime = Date.now() - startTime;
+      this.logger.error(`[${cycleId}] ✗ Bundle submission failed after ${totalTime}ms:`, error.message || error);
       throw error;
     } finally {
-      // Always release lock
-      this.executingCycles.delete(cycleId);
+      // Keep timestamp in map for lock duration
+      // Cleanup will handle removal after lock duration expires
+      // This ensures cycle is locked for 1s even after completion/error
     }
   }
 
