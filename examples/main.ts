@@ -88,6 +88,14 @@ async function main() {
     dashboardPort: 8080, // Enable HTTP dashboard on port 8080
     // discoveryFees: [100, 500],
     discoveryFees: [100, 500, 2500, 10000],
+    // Telegram notifications (optional)
+    telegramConfig: process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
+      ? {
+        botToken: process.env.TELEGRAM_BOT_TOKEN,
+        chatId: process.env.TELEGRAM_CHAT_ID,
+        enabled: true,
+      }
+      : undefined,
   });
 
   // Optional: Set execution with arbitrage contract (bundle mode only)

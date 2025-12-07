@@ -24,6 +24,7 @@ import {
   ArbitrageContractConfig,
 } from './services/index.js';
 import { CycleEstimator } from './estimation/cycleEstimator.js';
+import { TelegramNotifier, TelegramConfig } from './notifications/index.js';
 
 export interface TokenAmountConfig {
   minAmountIn: bigint;
@@ -58,6 +59,7 @@ export interface ArbitrageOptions {
   historyDir?: string; // History data directory path (default: 'data/history')
   maxHops?: number; // Maximum hops for cycle discovery (default: 3)
   discoveryFees?: number[]; // Fees to try during discovery (default: [100, 500, 2500, 10000])
+  telegramConfig?: TelegramConfig; // Telegram notification configuration (optional)
 }
 
 /**
@@ -81,10 +83,13 @@ export class CycleArbitrage {
   private cycleEstimator: CycleEstimator;
   private poolAddressResolver: PoolAddressResolver;
 
+  // Notifications
+  private telegramNotifier?: TelegramNotifier;
+
   private cycles: Map<string, CycleWithState> = new Map();
   private scanners: Map<string, CycleScanner> = new Map(); // Track active scanners for cleanup
   private isRunning: boolean = false; // Track if scanning is active
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees'>> & {
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees' | 'telegramConfig'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
     optimizationInterval: number;
@@ -94,6 +99,7 @@ export class CycleArbitrage {
     dashboardPort?: number;
     maxHops: number;
     discoveryFees: number[];
+    telegramConfig?: TelegramConfig;
   };
 
   constructor(
@@ -231,6 +237,7 @@ export class CycleArbitrage {
     // So we don't need to subscribe here
 
     this.tradeExecutor.on('execution', (data) => {
+      // Record metrics
       this.metrics.recordExecution(
         data.cycleId,
         data.profit,
@@ -238,6 +245,21 @@ export class CycleArbitrage {
         data.amountIn,
         data.arbitrageBps
       );
+
+      // Send Telegram notification
+      if (this.telegramNotifier) {
+        this.telegramNotifier.sendExecutionNotification({
+          cycleId: data.cycleId,
+          profit: data.profit,
+          txHash: data.txHash,
+          amountIn: data.amountIn,
+          amountOut: data.amountOut,
+          arbitrageBps: data.arbitrageBps,
+        }).catch((error: any) => {
+          // Log error but don't break execution flow
+          this.logger.error('[Telegram] Notification error:', error?.message || String(error));
+        });
+      }
     });
   }
 
