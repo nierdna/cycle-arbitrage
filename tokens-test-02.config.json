@@ -1,0 +1,24 @@
+{
+  "tokens": [
+    {
+      "address": "0x55d398326f99059fF775485246999027B3197955",
+      "name": "USDT",
+      "amountConfig": {
+        "minAmountIn": "10000000000",
+        "maxAmountIn": "10000000000000000000000"
+      }
+    },
+    {
+      "address": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
+      "name": "ETH",
+      "amountConfig": {
+        "minAmountIn": "10000000000",
+        "maxAmountIn": "10000000000000000000000"
+      }
+    }
+  ],
+  "arbitrage": {
+    "discoveryFees": [100, 500]
+  }
+}
+

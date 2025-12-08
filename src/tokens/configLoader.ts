@@ -17,8 +17,23 @@ export interface TokenConfig {
   };
 }
 
+export interface ArbitrageConfig {
+  discoveryFees?: number[];
+  minArbitrageBps?: number;
+  scanIntervalMs?: number;
+  amountIn?: string; // BigInt as string
+  optimizeAmountIn?: boolean;
+  optimizationInterval?: number;
+  optimizationPrecision?: string; // BigInt as string
+  dashboardPort?: number;
+  maxHops?: number;
+  gasPriceUpdateInterval?: number;
+  tokenPriceUpdateInterval?: number;
+}
+
 export interface TokensConfigFile {
   tokens: TokenConfig[];
+  arbitrage?: ArbitrageConfig;
 }
 
 /**
@@ -109,5 +124,80 @@ export function loadTokensFromConfig(configPath?: string): Token[] {
   }
 
   return tokens;
+}
+
+/**
+ * Load arbitrage config from JSON config file
+ * @param configPath Path to config file (default: tokens.config.json in project root)
+ * @returns ArbitrageConfig object or undefined if not found
+ * @throws Error if file not found or invalid JSON
+ */
+export function loadArbitrageConfig(configPath?: string): ArbitrageConfig | undefined {
+  const defaultPath = join(process.cwd(), 'tokens.config.json');
+  const envPath = process.env.TOKENS_CONFIG_PATH;
+  const rawPath = configPath || envPath || defaultPath;
+  
+  // Resolve path (handles both relative and absolute paths)
+  const filePath = resolve(rawPath);
+
+  let fileContent: string;
+  try {
+    fileContent = readFileSync(filePath, 'utf-8');
+  } catch (error) {
+    throw new Error(
+      `Failed to read tokens config file at ${filePath}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  let config: TokensConfigFile;
+  try {
+    config = JSON.parse(fileContent);
+  } catch (error) {
+    throw new Error(
+      `Invalid JSON in tokens config file: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  if (!config.arbitrage) {
+    return undefined;
+  }
+
+  const arbitrageConfig: ArbitrageConfig = { ...config.arbitrage };
+
+  // Convert string BigInt values to actual BigInt if needed (for validation)
+  // Note: We keep them as strings in the config, but validate format
+  if (arbitrageConfig.amountIn) {
+    try {
+      BigInt(arbitrageConfig.amountIn);
+    } catch (error) {
+      throw new Error(
+        `Invalid amountIn in arbitrage config: ${arbitrageConfig.amountIn} - ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  if (arbitrageConfig.optimizationPrecision) {
+    try {
+      BigInt(arbitrageConfig.optimizationPrecision);
+    } catch (error) {
+      throw new Error(
+        `Invalid optimizationPrecision in arbitrage config: ${arbitrageConfig.optimizationPrecision} - ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Validate discoveryFees
+  if (arbitrageConfig.discoveryFees) {
+    if (!Array.isArray(arbitrageConfig.discoveryFees)) {
+      throw new Error('discoveryFees must be an array');
+    }
+    for (const fee of arbitrageConfig.discoveryFees) {
+      if (typeof fee !== 'number' || fee < 0) {
+        throw new Error(`Invalid discovery fee: ${fee}. Must be a non-negative number`);
+      }
+    }
+  }
+
+  return arbitrageConfig;
 }
 

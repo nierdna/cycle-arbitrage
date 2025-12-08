@@ -14,7 +14,7 @@
 import 'dotenv/config';
 import { ethers } from 'ethers';
 import { CycleArbitrage } from '../src/cycleArbitrage.js';
-import { TokenRegistry, loadTokensFromConfig } from '../src/tokens/index.js';
+import { TokenRegistry, loadTokensFromConfig, loadArbitrageConfig } from '../src/tokens/index.js';
 import { BundleConfig } from '../src/services/index.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
 
@@ -51,19 +51,34 @@ async function main() {
 
   // Note: All tokens must have amountConfig. Cycles starting from tokens without config will be skipped.
 
+  // Load arbitrage config from file
+  let arbitrageConfigFromFile;
+  try {
+    arbitrageConfigFromFile = loadArbitrageConfig(configPath);
+  } catch (error) {
+    console.warn('Failed to load arbitrage config from file, using defaults:', error);
+  }
+
   // Create arbitrage instance with auto-discovery mode
-  const arbitrage = new CycleArbitrage(provider, tokenRegistry, {
-    minArbitrageBps: 2, // Minimum 2 bps profit
-    scanIntervalMs: 1, // Scan every 1ms
+  // Config from file takes precedence over hardcoded defaults
+  const arbitrageOptions = {
+    minArbitrageBps: arbitrageConfigFromFile?.minArbitrageBps ?? 2, // Minimum 2 bps profit
+    scanIntervalMs: arbitrageConfigFromFile?.scanIntervalMs ?? 1, // Scan every 1ms
     wssUrl: process.env.BSC_WSS_URL, // Optional: for real-time updates
-    amountIn: BigInt(1e18), // 1 USDT (18 decimals) - fallback if optimization disabled
+    amountIn: arbitrageConfigFromFile?.amountIn
+      ? BigInt(arbitrageConfigFromFile.amountIn)
+      : BigInt(1e18), // 1 USDT (18 decimals) - fallback if optimization disabled
     // Enable amountIn optimization using Ternary Search
-    optimizeAmountIn: true,
-    optimizationInterval: 100, // Re-optimize every 100 scans
-    optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
-    dashboardPort: 8080, // Enable HTTP dashboard on port 8080
-    // discoveryFees: [100, 500],
-    discoveryFees: [100, 500, 2500, 10000],
+    optimizeAmountIn: arbitrageConfigFromFile?.optimizeAmountIn ?? true,
+    optimizationInterval: arbitrageConfigFromFile?.optimizationInterval ?? 100, // Re-optimize every 100 scans
+    optimizationPrecision: arbitrageConfigFromFile?.optimizationPrecision
+      ? BigInt(arbitrageConfigFromFile.optimizationPrecision)
+      : BigInt(1e15), // 0.001 USDT - precision for ternary search
+    dashboardPort: arbitrageConfigFromFile?.dashboardPort ?? 8080, // Enable HTTP dashboard on port 8080
+    discoveryFees: arbitrageConfigFromFile?.discoveryFees ?? [100, 500, 2500, 10000],
+    maxHops: arbitrageConfigFromFile?.maxHops,
+    gasPriceUpdateInterval: arbitrageConfigFromFile?.gasPriceUpdateInterval,
+    tokenPriceUpdateInterval: arbitrageConfigFromFile?.tokenPriceUpdateInterval,
     // Telegram notifications (optional)
     telegramConfig: process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
       ? {
@@ -72,7 +87,9 @@ async function main() {
         enabled: true,
       }
       : undefined,
-  });
+  };
+
+  const arbitrage = new CycleArbitrage(provider, tokenRegistry, arbitrageOptions);
 
   // Optional: Set execution with arbitrage contract (bundle mode only)
   if (process.env.PRIVATE_KEY) {
