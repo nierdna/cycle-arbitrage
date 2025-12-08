@@ -187,6 +187,32 @@ export class DashboardServer {
         color: #4CAF50;
         font-weight: 600;
       }
+      th.sortable {
+        cursor: pointer;
+        user-select: none;
+        position: relative;
+        padding-right: 25px;
+      }
+      th.sortable:hover {
+        background: #4a4a4a;
+      }
+      th.sortable::after {
+        content: ' ↕';
+        position: absolute;
+        right: 8px;
+        opacity: 0.5;
+        font-size: 12px;
+      }
+      th.sortable.asc::after {
+        content: ' ↑';
+        opacity: 1;
+        color: #4CAF50;
+      }
+      th.sortable.desc::after {
+        content: ' ↓';
+        opacity: 1;
+        color: #4CAF50;
+      }
       td {
         padding: 10px 12px;
         border-top: 1px solid #3a3a3a;
@@ -285,6 +311,28 @@ export class DashboardServer {
       <div class="chart-container" style="background: #1a1f3a; border-radius: 10px; padding: 20px; margin-bottom: 20px;">
         <canvas id="arbChart" style="max-height: 400px;"></canvas>
       </div>
+      
+      <div id="chartDetails" style="background: #2a2a2a; border-radius: 8px; padding: 15px; margin-bottom: 20px; display: none;">
+        <h3 style="color: #4CAF50; margin-bottom: 10px; font-size: 16px;">📊 Latest Scan Details</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+          <div>
+            <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Profit</div>
+            <div style="color: #4CAF50; font-size: 18px; font-weight: bold;" id="detailProfit">-</div>
+          </div>
+          <div>
+            <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Min Profit</div>
+            <div style="color: #ffa500; font-size: 18px; font-weight: bold;" id="detailMinProfit">-</div>
+          </div>
+          <div>
+            <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Amount In</div>
+            <div style="color: #60a5fa; font-size: 18px; font-weight: bold;" id="detailAmountIn">-</div>
+          </div>
+          <div>
+            <div style="color: #888; font-size: 12px; margin-bottom: 5px;">Arbitrage BPS</div>
+            <div style="color: #e0e0e0; font-size: 18px; font-weight: bold;" id="detailArbBps">-</div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script>
@@ -339,17 +387,94 @@ export class DashboardServer {
         cell.textContent = newValue;
       }
 
+      // Sort state
+      let sortColumn = null;
+      let sortDirection = 'desc'; // 'asc' or 'desc'
+
+      // Sort cycles array
+      function sortCycles(cycles, column, direction) {
+        const sorted = [...cycles];
+        sorted.sort((a, b) => {
+          let aVal, bVal;
+
+          switch(column) {
+            case 'bestArb':
+              aVal = a.bestArbitrage !== null && a.bestArbitrage !== undefined
+                ? a.bestArbitrage
+                : (a.bestAmountInArbBps !== null && a.bestAmountInArbBps !== undefined
+                    ? a.bestAmountInArbBps
+                    : -Infinity);
+              bVal = b.bestArbitrage !== null && b.bestArbitrage !== undefined
+                ? b.bestArbitrage
+                : (b.bestAmountInArbBps !== null && b.bestAmountInArbBps !== undefined
+                    ? b.bestAmountInArbBps
+                    : -Infinity);
+              break;
+            case 'avgArb':
+              aVal = a.avgArbitrage || 0;
+              bVal = b.avgArbitrage || 0;
+              break;
+            case 'totalProfit':
+              aVal = BigInt(a.totalProfit || '0');
+              bVal = BigInt(b.totalProfit || '0');
+              break;
+            case 'opportunities':
+              aVal = a.opportunities || 0;
+              bVal = b.opportunities || 0;
+              break;
+            default:
+              return 0;
+          }
+
+          if (aVal < bVal) return direction === 'asc' ? -1 : 1;
+          if (aVal > bVal) return direction === 'asc' ? 1 : -1;
+          return 0;
+        });
+        return sorted;
+      }
+
+      // Handle header click for sorting
+      function handleSort(column) {
+        if (sortColumn === column) {
+          // Toggle direction if same column
+          sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+        } else {
+          // New column, default to desc
+          sortColumn = column;
+          sortDirection = 'desc';
+        }
+
+        // Update header classes
+        const headers = document.querySelectorAll('th.sortable');
+        headers.forEach(th => {
+          th.classList.remove('asc', 'desc');
+          if (th.dataset.sort === column) {
+            th.classList.add(sortDirection);
+          }
+        });
+
+        // Re-sort and update table
+        fetch('/api/metrics')
+          .then(r => r.json())
+          .then(data => {
+            if (data.cycles && data.cycles.length > 0) {
+              const sorted = sortCycles(data.cycles, sortColumn, sortDirection);
+              updateTableIncremental(sorted);
+            }
+          });
+      }
+
       // Build table HTML (for first time)
       function buildTableHTML(cycles) {
         let html = '<table><thead><tr>';
         html += '<th>Cycle ID</th>';
         html += '<th>Scans</th>';
-        html += '<th>Opportunities</th>';
+        html += '<th class="sortable" data-sort="opportunities">Opportunities</th>';
         html += '<th>Executions</th>';
-        html += '<th>Best Arb (bps)</th>';
+        html += '<th class="sortable" data-sort="bestArb">Best Arb (bps)</th>';
         html += '<th>Best AmountIn</th>';
-        html += '<th>Avg Arb (bps)</th>';
-        html += '<th>Total Profit</th>';
+        html += '<th class="sortable" data-sort="avgArb">Avg Arb (bps)</th>';
+        html += '<th class="sortable" data-sort="totalProfit">Total Profit</th>';
         html += '<th>Last Opportunity</th>';
         html += '</tr></thead><tbody>';
 
@@ -359,6 +484,19 @@ export class DashboardServer {
 
         html += '</tbody></table>';
         return html;
+      }
+
+      // Setup sort event listeners
+      function setupSortListeners() {
+        const sortableHeaders = document.querySelectorAll('th.sortable');
+        sortableHeaders.forEach(header => {
+          header.addEventListener('click', function() {
+            const column = this.dataset.sort;
+            if (column) {
+              handleSort(column);
+            }
+          });
+        });
       }
 
       // Build row HTML
@@ -414,6 +552,15 @@ export class DashboardServer {
           // First time: create table
           if (cycles && cycles.length > 0) {
             container.innerHTML = buildTableHTML(cycles);
+            // Setup sort listeners
+            setupSortListeners();
+            // Apply sort indicator to headers
+            if (sortColumn) {
+              const header = container.querySelector('th[data-sort="' + sortColumn + '"]');
+              if (header) {
+                header.classList.add(sortDirection);
+              }
+            }
           } else {
             container.innerHTML = '<p>No cycles data available</p>';
           }
@@ -554,8 +701,14 @@ export class DashboardServer {
 
             // Update cycles table incrementally
             if (data.cycles && data.cycles.length > 0) {
+              // Apply sorting if sort is active
+              let cyclesToDisplay = data.cycles;
+              if (sortColumn) {
+                cyclesToDisplay = sortCycles(data.cycles, sortColumn, sortDirection);
+              }
+
               // Debug: Log bestAmountInFormatted values
-              data.cycles.forEach(function(cycle) {
+              cyclesToDisplay.forEach(function(cycle) {
                 console.log('[DEBUG] Cycle ' + cycle.cycleId + ':', {
                   bestAmountInFormatted: cycle.bestAmountInFormatted,
                   bestAmountInFormattedType: typeof cycle.bestAmountInFormatted,
@@ -564,7 +717,7 @@ export class DashboardServer {
                   hasValue: cycle.bestAmountInFormatted != null && cycle.bestAmountInFormatted !== ''
                 });
               });
-              updateTableIncremental(data.cycles);
+              updateTableIncremental(cyclesToDisplay);
               
               // Update cycle select for chart
               updateChartCycleSelect(data.cycles);
@@ -625,11 +778,70 @@ export class DashboardServer {
           .then(function(r) { return r.json(); })
           .then(function(data) {
             updateChart(data);
+            updateChartDetails(data);
           })
           .catch(function(err) {
             console.error('Error loading chart data:', err);
             alert('Error loading chart data: ' + err);
           });
+      }
+
+      function updateChartDetails(data) {
+        const detailsDiv = document.getElementById('chartDetails');
+        if (!detailsDiv) return;
+        
+        // Get the latest data point with profit, minProfit, amountIn
+        let latestPoint = null;
+        for (let i = data.data.length - 1; i >= 0; i--) {
+          const point = data.data[i];
+          if (point.profit || point.minProfit || point.amountIn) {
+            latestPoint = point;
+            break;
+          }
+        }
+        
+        if (latestPoint) {
+          detailsDiv.style.display = 'block';
+          
+          const profitEl = document.getElementById('detailProfit');
+          const minProfitEl = document.getElementById('detailMinProfit');
+          const amountInEl = document.getElementById('detailAmountIn');
+          const arbBpsEl = document.getElementById('detailArbBps');
+          
+          if (profitEl) {
+            profitEl.textContent = latestPoint.profit 
+              ? formatWeiToEther(latestPoint.profit) + ' ETH'
+              : '-';
+          }
+          if (minProfitEl) {
+            minProfitEl.textContent = latestPoint.minProfit 
+              ? formatWeiToEther(latestPoint.minProfit) + ' ETH'
+              : '-';
+          }
+          if (amountInEl) {
+            amountInEl.textContent = latestPoint.amountIn 
+              ? formatWeiToEther(latestPoint.amountIn) + ' ETH'
+              : '-';
+          }
+          if (arbBpsEl) {
+            arbBpsEl.textContent = latestPoint.arbitrageBps !== null 
+              ? latestPoint.arbitrageBps.toFixed(2) + ' bps'
+              : '-';
+          }
+        } else {
+          detailsDiv.style.display = 'none';
+        }
+      }
+
+      function formatWeiToEther(weiStr) {
+        if (!weiStr) return null;
+        try {
+          const wei = BigInt(weiStr);
+          const ether = Number(wei) / 1e18;
+          return ether.toFixed(6);
+        } catch (e) {
+          return weiStr;
+        }
       }
 
       function updateChart(data) {
@@ -651,6 +863,9 @@ export class DashboardServer {
         const bestAmountInArbBpsData = data.data.map(function(point) {
           return point.bestAmountInArbBps !== null ? point.bestAmountInArbBps : null;
         });
+        
+        // Store full data points for tooltip
+        const fullDataPoints = data.data;
         
         // Destroy existing chart
         if (arbChart) {
@@ -702,6 +917,28 @@ export class DashboardServer {
               tooltip: {
                 mode: 'index',
                 intersect: false,
+                callbacks: {
+                  afterBody: function(context) {
+                    const index = context[0].dataIndex;
+                    const point = fullDataPoints[index];
+                    if (!point) return '';
+                    
+                    const lines = [];
+                    if (point.profit !== null && point.profit !== undefined) {
+                      const profitEth = formatWeiToEther(point.profit);
+                      lines.push('Profit: ' + profitEth + ' ETH');
+                    }
+                    if (point.minProfit !== null && point.minProfit !== undefined) {
+                      const minProfitEth = formatWeiToEther(point.minProfit);
+                      lines.push('Min Profit: ' + minProfitEth + ' ETH');
+                    }
+                    if (point.amountIn !== null && point.amountIn !== undefined) {
+                      const amountInEth = formatWeiToEther(point.amountIn);
+                      lines.push('Amount In: ' + amountInEth + ' ETH');
+                    }
+                    return lines.length > 0 ? lines : '';
+                  }
+                }
               }
             },
             scales: {
