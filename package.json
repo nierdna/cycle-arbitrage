@@ -20,10 +20,13 @@
     "pm2:logs": "pm2 logs cycle-arbitrage",
     "pm2:status": "pm2 status",
     "pm2:delete": "pm2 delete cycle-arbitrage",
-    "transfer:bnb": "tsx examples/transferBNB.ts"
+    "transfer:bnb": "tsx examples/transferBNB.ts",
+    "migrate:history": "tsx src/monitoring/migrateToSQLite.ts"
   },
   "dependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "axios": "^1.13.2",
+    "better-sqlite3": "^12.5.0",
     "dotenv": "^17.2.3",
     "ethers": "^6.9.0",
     "express": "^4.18.2",

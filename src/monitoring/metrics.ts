@@ -243,9 +243,20 @@ export class MetricsCollector {
     this.pendingOpportunities.clear();
 
     // Flush remaining data
-    this.flushSaveBatch().catch(err => {
-      console.error('Error flushing save batch on stop:', err);
-    });
+    this.flushSaveBatch()
+      .then(() => {
+        // Close database connection after flushing
+        if (this.historyPersistence && typeof (this.historyPersistence as any).close === 'function') {
+          (this.historyPersistence as any).close();
+        }
+      })
+      .catch(err => {
+        console.error('Error flushing save batch on stop:', err);
+        // Still try to close database
+        if (this.historyPersistence && typeof (this.historyPersistence as any).close === 'function') {
+          (this.historyPersistence as any).close();
+        }
+      });
   }
 
   recordScan(cycleId: string): void {
