@@ -125,7 +125,7 @@ export class CycleScanner extends EventEmitter {
   ): Promise<void> {
     if (!this.amountOptimizer || !this.logger) return;
 
-    this.logger.info(
+    this.logger.debug(
       `[${this.cycleId}] Finding optimal amountIn (range: ${ethers.formatEther(minAmountIn)} - ${ethers.formatEther(maxAmountIn)})...`
     );
 
@@ -147,7 +147,7 @@ export class CycleScanner extends EventEmitter {
         arbitrageBps: this.optimalArbBps,
       });
 
-      this.logger.info(
+      this.logger.debug(
         `[${this.cycleId}] Optimal: ${ethers.formatEther(this.optimalAmountIn)} tokens, ` +
         `arb: ${this.optimalArbBps.toFixed(2)} bps`
       );
@@ -255,7 +255,7 @@ export class CycleScanner extends EventEmitter {
           arbitrageBps: this.optimalArbBps,
         });
 
-        this.logger.info(
+        this.logger.debug(
           `[${this.cycleId}] Re-optimized: ${ethers.formatEther(this.optimalAmountIn)} tokens, ` +
           `arb: ${this.optimalArbBps.toFixed(2)} bps`
         );

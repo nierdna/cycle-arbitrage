@@ -2,29 +2,21 @@
  * Example: Cycle Arbitrage MVP
  * 
  * Usage:
- *   Create .env file or export environment variables:
- *   BSC_RPC_URL=https://bsc-dataseed.binance.org/
- *   BSC_WSS_URL=wss://... (optional, for real-time updates)
- *   PRIVATE_KEY=0x... (optional, for execution)
- *   npm start
+ *   1. Create tokens.config.json in project root (see tokens.config.json.example)
+ *   2. Create .env file or export environment variables:
+ *      BSC_RPC_URL=https://bsc-dataseed.binance.org/
+ *      BSC_WSS_URL=wss://... (optional, for real-time updates)
+ *      PRIVATE_KEY=0x... (optional, for execution)
+ *      TOKENS_CONFIG_PATH=./tokens.config.json (optional, override config path)
+ *   3. npm start
  */
 
 import 'dotenv/config';
 import { ethers } from 'ethers';
 import { CycleArbitrage } from '../src/cycleArbitrage.js';
-import { Token, TokenRegistry } from '../src/tokens/index.js';
+import { TokenRegistry, loadTokensFromConfig } from '../src/tokens/index.js';
 import { BundleConfig } from '../src/services/index.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
-
-// Token addresses on BSC (from execution/web3pro/const.py)
-const TOKENS = {
-  USDT: '0x55d398326f99059fF775485246999027B3197955',
-  WBNB: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
-  ASTER: '0x000Ae314E2A2172a039B26378814C252734f556A',
-  ETH: "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
-  KOGE: "0xe6DF05CE8C8301223373CF5B969AFCb1498c5528",
-  USDC: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
-};
 
 async function main() {
   console.log('=== Cycle Arbitrage MVP ===\n');
@@ -41,48 +33,23 @@ async function main() {
   // Initialize decimal cache (load from file if exists)
   await tokenRegistry.initialize();
 
-  // Add tokens with name and amount config
-  tokenRegistry.addToken(new Token(
-    TOKENS.USDT,
-    'USDT',
-    {
-      minAmountIn: BigInt(1e10), // 0.0001 USDT
-      maxAmountIn: BigInt(1e20), // 10 USDT
-    }
-  ));
-  // tokenRegistry.addToken(new Token(
-  //   TOKENS.USDC,
-  //   'USDC',
-  //   {
-  //     minAmountIn: BigInt(1e10), // 0.0001 USDC
-  //     maxAmountIn: BigInt(1e20), // 10 USDC
-  //   }
-  // ));
-
-  tokenRegistry.addToken(new Token(
-    TOKENS.WBNB,
-    'WBNB',
-    {
-      minAmountIn: BigInt(1e15), // 0.001 WBNB
-      maxAmountIn: BigInt(1e20), // 100 WBNB
-    }
-  ));
+  // Load tokens from config file
+  // Config path can be overridden via TOKENS_CONFIG_PATH env variable
+  // Default: tokens.config.json in project root
+  const configPath = process.env.TOKENS_CONFIG_PATH;
+  if (configPath) {
+    console.log(`Using tokens config: ${configPath}\n`);
+  }
+  try {
+    const tokens = loadTokensFromConfig(configPath);
+    tokenRegistry.addTokens(tokens);
+    console.log(`Loaded ${tokens.length} tokens from config file\n`);
+  } catch (error) {
+    console.error('Failed to load tokens from config file:', error);
+    throw error;
+  }
 
   // Note: All tokens must have amountConfig. Cycles starting from tokens without config will be skipped.
-  // tokenRegistry.addToken(new Token(TOKENS.ASTER, 'ASTER', {
-  //   minAmountIn: BigInt(1e10),
-  //   maxAmountIn: BigInt(1e20),
-  // }));
-
-  // tokenRegistry.addToken(new Token(TOKENS.KOGE, 'KOGE', {
-  //   minAmountIn: BigInt(1e10),
-  //   maxAmountIn: BigInt(1e20),
-  // }));
-
-  // tokenRegistry.addToken(new Token(TOKENS.ETH, 'ETH', {
-  //   minAmountIn: BigInt(1e10),
-  //   maxAmountIn: BigInt(1e20),
-  // }));
 
   // Create arbitrage instance with auto-discovery mode
   const arbitrage = new CycleArbitrage(provider, tokenRegistry, {
