@@ -22,6 +22,7 @@ import { MIN_SQRT_RATIO, MAX_SQRT_RATIO } from '../constants.js';
 import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
 import { getTokenPriceInUSDT } from '../utils/poolLiquidityHelper.js';
 import { DecimalCache } from '../tokens/decimalCache.js';
+import { MinProfitCalculator } from './minProfitCalculator.js';
 
 export interface BundleConfig {
   rpcUrl: string;
@@ -55,7 +56,8 @@ export class TradeExecutor extends EventEmitter {
     wallet: ethers.Wallet | NonceCachedWallet,
     private logger: winston.Logger,
     private bundleConfig: BundleConfig,
-    contractConfig: ArbitrageContractConfig
+    contractConfig: ArbitrageContractConfig,
+    private minProfitCalculator?: MinProfitCalculator
   ) {
     super(); // Call EventEmitter constructor
     // Save contract address
@@ -158,7 +160,13 @@ export class TradeExecutor extends EventEmitter {
       const maxPriorityFeePerGas = (await this.wallet.provider?.getFeeData())?.gasPrice || ethers.parseUnits("0.05", "gwei");
       const maxFeePerGas = ethers.parseUnits("3", "gwei");
 
-      const minProfit = await this.calculateMinProfit(poolCount, cycle, maxPriorityFeePerGas);
+      // Use MinProfitCalculator if available, otherwise fallback to local calculation
+      let minProfit: bigint;
+      if (this.minProfitCalculator) {
+        minProfit = await this.minProfitCalculator.calculateMinProfit(cycle, poolCount);
+      } else {
+        minProfit = await this.calculateMinProfit(poolCount, cycle, maxPriorityFeePerGas);
+      }
 
       // Tip amount (optional)
       const tipAmount = ethers.parseEther('0.00001');

@@ -9,9 +9,10 @@ import { EventEmitter } from 'events';
 import { AmountOptimizer } from '../optimization/amountOptimizer.js';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { CycleFormatter } from './cycleFormatter.js';
+import { MinProfitCalculator } from './minProfitCalculator.js';
 
 export interface ScanOptions {
-  minArbitrageBps: number;
+  minArbitrageBps?: number; // Deprecated: kept for backward compatibility, not used anymore
   scanIntervalMs: number;
   amountIn: bigint;
   optimizeAmountIn: boolean;
@@ -39,6 +40,7 @@ export class CycleScanner extends EventEmitter {
     private cycle: CycleWithState,
     private estimateAmountOut: (cycleId: string, amountIn: bigint) => Promise<bigint>,
     private options: ScanOptions,
+    private minProfitCalculator: MinProfitCalculator,
     private amountOptimizer?: AmountOptimizer,
     private logger?: winston.Logger,
     private formatter?: CycleFormatter
@@ -179,9 +181,10 @@ export class CycleScanner extends EventEmitter {
     // Estimate amount out
     const amountOut = await this.estimateAmountOut(this.cycleId, this.currentAmountIn);
 
-    // Calculate arbitrage in bps
+    // Calculate profit and arbitrage in bps
+    const profit = amountOut - this.currentAmountIn;
     const arbitrageBps = Number(
-      ((amountOut - this.currentAmountIn) * BigInt(1e4)) / this.currentAmountIn
+      (profit * BigInt(1e4)) / this.currentAmountIn
     );
 
     this.scanCount++;
@@ -194,8 +197,15 @@ export class CycleScanner extends EventEmitter {
       });
     }
 
-    // Check for opportunity
-    if (arbitrageBps > this.options.minArbitrageBps) {
+    // Calculate minProfit for this cycle
+    const poolCount = this.cycle.poolAddresses.length;
+    const minProfit = await this.minProfitCalculator.calculateMinProfit(
+      this.cycle,
+      poolCount
+    );
+
+    // Check for opportunity: profit must be >= minProfit
+    if (profit >= minProfit) {
       const result: ScanResult = {
         arbitrageBps,
         amountIn: this.currentAmountIn,
@@ -205,10 +215,11 @@ export class CycleScanner extends EventEmitter {
       };
 
       await this.handleOpportunity(result);
-    } else if (this.scanCount % 1000 === 0) {
+    } else if (this.scanCount % 10000 === 0) {
       this.logger?.info(
         `[${this.cycleId}] Scanning... ` +
-        `(arb: ${arbitrageBps.toFixed(2)} bps, amount: ${ethers.formatEther(this.currentAmountIn)}, scans: ${this.scanCount})`
+        `(arb: ${arbitrageBps.toFixed(2)} bps, profit: ${ethers.formatEther(profit)}, ` +
+        `minProfit: ${ethers.formatEther(minProfit)}, amount: ${ethers.formatEther(this.currentAmountIn)}, scans: ${this.scanCount})`
       );
     }
   }
