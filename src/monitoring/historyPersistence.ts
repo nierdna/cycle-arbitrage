@@ -45,6 +45,9 @@ export class HistoryPersistence {
         cycle_id TEXT NOT NULL,
         arbitrage_bps REAL,
         best_amount_in_arb_bps REAL,
+        profit TEXT,
+        min_profit TEXT,
+        amount_in TEXT,
         execution_profit TEXT,
         execution_tx_hash TEXT,
         execution_amount_in TEXT,
@@ -56,6 +59,20 @@ export class HistoryPersistence {
       CREATE INDEX IF NOT EXISTS idx_cycle_id ON history_points(cycle_id);
       CREATE INDEX IF NOT EXISTS idx_cycle_timestamp ON history_points(cycle_id, timestamp);
     `);
+
+    // Add new columns if they don't exist (for existing databases)
+    try {
+      this.db.exec(`
+        ALTER TABLE history_points ADD COLUMN profit TEXT;
+        ALTER TABLE history_points ADD COLUMN min_profit TEXT;
+        ALTER TABLE history_points ADD COLUMN amount_in TEXT;
+      `);
+    } catch (err: any) {
+      // Columns might already exist, ignore error
+      if (!err.message.includes('duplicate column name')) {
+        console.warn('Warning: Could not add new columns to history_points:', err.message);
+      }
+    }
   }
 
   /**
@@ -67,6 +84,15 @@ export class HistoryPersistence {
       cycle_id: point.cycleId,
       arbitrage_bps: point.arbitrageBps ?? null,
       best_amount_in_arb_bps: point.bestAmountInArbBps ?? null,
+      profit: point.profit !== undefined
+        ? String(point.profit)
+        : null,
+      min_profit: point.minProfit !== undefined
+        ? String(point.minProfit)
+        : null,
+      amount_in: point.amountIn !== undefined
+        ? String(point.amountIn)
+        : null,
       execution_profit: point.executionProfit !== undefined
         ? String(point.executionProfit)
         : null,
@@ -88,6 +114,17 @@ export class HistoryPersistence {
       arbitrageBps: row.arbitrage_bps,
       bestAmountInArbBps: row.best_amount_in_arb_bps,
     };
+
+    // Add scan data if present
+    if (row.profit !== null && row.profit !== undefined) {
+      point.profit = row.profit;
+    }
+    if (row.min_profit !== null && row.min_profit !== undefined) {
+      point.minProfit = row.min_profit;
+    }
+    if (row.amount_in !== null && row.amount_in !== undefined) {
+      point.amountIn = row.amount_in;
+    }
 
     // Add execution data if present
     if (row.execution_profit !== null) {
@@ -116,8 +153,9 @@ export class HistoryPersistence {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO history_points 
       (timestamp, cycle_id, arbitrage_bps, best_amount_in_arb_bps, 
+       profit, min_profit, amount_in,
        execution_profit, execution_tx_hash, execution_amount_in, execution_arbitrage_bps)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = this.db.transaction((points: HistoricalDataPoint[]) => {
@@ -128,6 +166,9 @@ export class HistoryPersistence {
           row.cycle_id,
           row.arbitrage_bps,
           row.best_amount_in_arb_bps,
+          row.profit,
+          row.min_profit,
+          row.amount_in,
           row.execution_profit,
           row.execution_tx_hash,
           row.execution_amount_in,
@@ -223,3 +264,101 @@ export class HistoryPersistence {
     this.db.close();
   }
 }
+
+/**
+ * Test function to verify profit, minProfit, amountIn persistence
+ * Run with: npx tsx src/monitoring/historyPersistence.ts
+ */
+async function testHistoryPersistence() {
+  console.log('🧪 Testing HistoryPersistence with profit, minProfit, amountIn...\n');
+
+  // Use test database in temp directory
+  const testDb = new HistoryPersistence('data/history-test');
+
+  try {
+    const now = Date.now();
+    const testCycleId = 'test-cycle-123';
+
+    // Create test data points with profit, minProfit, amountIn
+    const testPoints: HistoricalDataPoint[] = [
+      {
+        timestamp: now,
+        cycleId: testCycleId,
+        arbitrageBps: 50.5,
+        bestAmountInArbBps: null,
+        profit: '1000000000000000000', // 1 ETH in wei (as string)
+        minProfit: '500000000000000000', // 0.5 ETH in wei (as string)
+        amountIn: '10000000000000000000', // 10 ETH in wei (as string)
+      },
+      {
+        timestamp: now + 1000,
+        cycleId: testCycleId,
+        arbitrageBps: 75.2,
+        bestAmountInArbBps: null,
+        profit: '2000000000000000000', // 2 ETH
+        minProfit: '600000000000000000', // 0.6 ETH
+        amountIn: '15000000000000000000', // 15 ETH
+      },
+    ];
+
+    // Save test data
+    console.log('📝 Saving test data points...');
+    await testDb.saveDataPoints(testPoints);
+    console.log(`✅ Saved ${testPoints.length} data points\n`);
+
+    // Load and verify
+    console.log('📖 Loading data points...');
+    const loaded = await testDb.loadDataPoints(
+      testCycleId,
+      now - 1000,
+      now + 2000
+    );
+    console.log(`✅ Loaded ${loaded.length} data points\n`);
+
+    // Verify data
+    console.log('🔍 Verifying data...');
+    let allPassed = true;
+
+    for (let i = 0; i < testPoints.length; i++) {
+      const original = testPoints[i];
+      const loadedPoint = loaded[i];
+
+      const checks = [
+        { name: 'arbitrageBps', original: original.arbitrageBps, loaded: loadedPoint.arbitrageBps },
+        { name: 'profit', original: original.profit, loaded: loadedPoint.profit },
+        { name: 'minProfit', original: original.minProfit, loaded: loadedPoint.minProfit },
+        { name: 'amountIn', original: original.amountIn, loaded: loadedPoint.amountIn },
+      ];
+
+      for (const check of checks) {
+        if (String(check.original) !== String(check.loaded)) {
+          console.error(`❌ ${check.name} mismatch: expected ${check.original}, got ${check.loaded}`);
+          allPassed = false;
+        } else {
+          console.log(`✅ ${check.name}: ${check.original}`);
+        }
+      }
+      console.log('');
+    }
+
+    if (allPassed) {
+      console.log('🎉 All tests passed!');
+    } else {
+      console.error('❌ Some tests failed');
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error('❌ Test failed with error:', error);
+    process.exit(1);
+  } finally {
+    // Cleanup
+    testDb.close();
+    console.log('\n🧹 Test database closed');
+  }
+}
+
+// Export test function for manual execution
+export { testHistoryPersistence };
+
+// Uncomment below to run test directly:
+// testHistoryPersistence().catch(console.error);

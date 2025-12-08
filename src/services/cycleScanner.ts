@@ -204,6 +204,13 @@ export class CycleScanner extends EventEmitter {
     const profit = amountOut - this.currentAmountIn;
     const arbitrageBps = Number((profit * BigInt(1e4)) / this.currentAmountIn);
 
+    // Calculate minProfit for this cycle
+    const poolCount = this.cycle.poolAddresses.length;
+    const minProfit = await this.minProfitCalculator.calculateMinProfit(
+      this.cycle,
+      poolCount
+    );
+
     this.scanCount++;
 
     // Emit arbitrage BPS event for historical chart (every 1000 scans)
@@ -211,15 +218,11 @@ export class CycleScanner extends EventEmitter {
       this.emit("arbitrage-bps", {
         cycleId: this.cycleId,
         arbitrageBps,
+        profit,
+        minProfit,
+        amountIn: this.currentAmountIn,
       });
     }
-
-    // Calculate minProfit for this cycle
-    const poolCount = this.cycle.poolAddresses.length;
-    const minProfit = await this.minProfitCalculator.calculateMinProfit(
-      this.cycle,
-      poolCount
-    );
 
     // Check for opportunity: profit must be >= minProfit
     if (profit >= minProfit) {

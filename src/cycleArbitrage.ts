@@ -487,7 +487,13 @@ export class CycleArbitrage {
     });
 
     scanner.on('arbitrage-bps', (data) => {
-      this.metrics.recordArbitrageBps(data.cycleId, data.arbitrageBps);
+      this.metrics.recordArbitrageBps(
+        data.cycleId,
+        data.arbitrageBps,
+        data.profit,
+        data.minProfit,
+        data.amountIn
+      );
     });
 
     scanner.on('optimization-result', (data) => {

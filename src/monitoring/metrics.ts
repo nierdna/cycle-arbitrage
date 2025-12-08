@@ -26,6 +26,10 @@ export interface HistoricalDataPoint {
   cycleId: string;
   arbitrageBps: number | null; // from opportunity (aggregated by second)
   bestAmountInArbBps: number | null; // from optimization
+  // Scan data (optional, from periodic scans)
+  profit?: bigint | string; // Profit from scan (bigint serialized as string)
+  minProfit?: bigint | string; // Min profit required (bigint serialized as string)
+  amountIn?: bigint | string; // Amount in used for scan (bigint serialized as string)
   // Execution data (optional, only present for execution events)
   executionProfit?: bigint | string; // Profit from execution (bigint serialized as string)
   executionTxHash?: string; // Transaction hash
@@ -402,13 +406,22 @@ export class MetricsCollector {
    * Record arbitrage BPS for historical chart
    * This is called periodically during scanning to track arbitrage trends over time
    */
-  recordArbitrageBps(cycleId: string, arbitrageBps: number): void {
-    // Record historical data point with arbitrage BPS
+  recordArbitrageBps(
+    cycleId: string,
+    arbitrageBps: number,
+    profit?: bigint,
+    minProfit?: bigint,
+    amountIn?: bigint
+  ): void {
+  // Record historical data point with arbitrage BPS and additional scan data
     this.addHistoricalDataPoint({
       timestamp: Date.now(),
       cycleId,
       arbitrageBps: arbitrageBps,
       bestAmountInArbBps: null,
+      profit: profit?.toString(),
+      minProfit: minProfit?.toString(),
+      amountIn: amountIn?.toString(),
     });
   }
   
