@@ -20,6 +20,8 @@ import { EventEmitter } from 'events';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { MIN_SQRT_RATIO, MAX_SQRT_RATIO } from '../constants.js';
 import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
+import { getTokenPriceInUSDT } from '../utils/poolLiquidityHelper.js';
+import { DecimalCache } from '../tokens/decimalCache.js';
 
 export interface BundleConfig {
   rpcUrl: string;
@@ -40,6 +42,14 @@ export class TradeExecutor extends EventEmitter {
   private executingCycles: Map<string, number> = new Map(); // Track cycles với timestamp: cycleId -> timestamp
   private wallet: NonceCachedWallet; // Use NonceCachedWallet instead of ethers.Wallet
   private readonly LOCK_DURATION_MS = 1000; // Lock duration: 1 second
+  private decimalCache: DecimalCache;
+
+  // WBNB address on BSC
+  private readonly WBNB_ADDRESS = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
+
+  // Gas used constants
+  private readonly GAS_USED_2_POOLS = 231398;
+  private readonly GAS_USED_3_POOLS = 321410;
 
   constructor(
     wallet: ethers.Wallet | NonceCachedWallet,
@@ -62,6 +72,13 @@ export class TradeExecutor extends EventEmitter {
         logger: this.logger,
       });
     }
+
+    // Initialize DecimalCache for price lookups
+    const provider = this.wallet.provider || new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
+    this.decimalCache = new DecimalCache(provider);
+    this.decimalCache.load().catch((error) => {
+      this.logger.warn(`Failed to load decimal cache: ${error.message}`);
+    });
 
     // Create contract instance
     this.arbitrageContract = new ethers.Contract(
@@ -137,8 +154,11 @@ export class TradeExecutor extends EventEmitter {
       // Contract expects exact output amount from Pool1 (ví dụ: 101 USDT)
       const exactOutputAmount = estimatedOut;
 
-      // Calculate min profit (optional, set to 0 to disable check)
-      const minProfit = 1n;
+      // Calculate min profit based on gas cost
+      const maxPriorityFeePerGas = (await this.wallet.provider?.getFeeData())?.gasPrice || ethers.parseUnits("0.05", "gwei");
+      const maxFeePerGas = ethers.parseUnits("3", "gwei");
+
+      const minProfit = await this.calculateMinProfit(poolCount, cycle, maxPriorityFeePerGas);
 
       // Tip amount (optional)
       const tipAmount = ethers.parseEther('0.00001');
@@ -182,10 +202,6 @@ export class TradeExecutor extends EventEmitter {
           tipAmount,
         ]);
       }
-
-      // Get gas price
-      const maxPriorityFeePerGas = (await this.wallet.provider?.getFeeData())?.gasPrice || ethers.parseUnits("0.05", "gwei");
-      const maxFeePerGas = ethers.parseUnits("3", "gwei");
 
       // Estimate gas limit based on pool count
       const gasLimit = poolCount === 2 ? 500000n : 1000000n;
@@ -395,6 +411,77 @@ export class TradeExecutor extends EventEmitter {
       return { token0: tokenA, token1: tokenB };
     } else {
       return { token0: tokenB, token1: tokenA };
+    }
+  }
+
+  /**
+   * Calculate minimum profit based on gas cost
+   * Formula: minProfit = (gasUsed * gasPrice * wbnbPrice) / startTokenPrice
+   * 
+   * @param poolCount Number of pools (2 or 3)
+   * @param cycle Cycle information to get start token address and price
+   * @returns Minimum profit in start token units (with correct decimals)
+   */
+  private async calculateMinProfit(poolCount: number, cycle: CycleWithState, gasPriceWei: bigint): Promise<bigint> {
+    try {
+      // Get gas used based on pool count
+      const gasUsed = poolCount === 2 ? this.GAS_USED_2_POOLS : this.GAS_USED_3_POOLS;
+
+      // Get gas price (use same logic as transaction: maxFeePerGas = 3 gwei)
+      // This should match the gas price used in the actual transaction
+
+      // Calculate gas value in wei
+      const gasValueWei = BigInt(gasUsed) * gasPriceWei;
+
+      // Get provider
+      const provider = this.wallet.provider || new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
+
+      // Get WBNB price in USDT
+      const wbnbPrice = await getTokenPriceInUSDT(provider, this.WBNB_ADDRESS, this.decimalCache);
+
+      if (!wbnbPrice || wbnbPrice <= 0) {
+        this.logger.warn('Failed to get WBNB price, using default minProfit = 1');
+        return 1n;
+      }
+
+      // Get start token address (first token in cycle)
+      const startTokenAddress = cycle.addresses[0];
+
+      // Get start token price in USDT
+      const startTokenPrice = await getTokenPriceInUSDT(provider, startTokenAddress, this.decimalCache);
+
+      if (!startTokenPrice || startTokenPrice <= 0) {
+        this.logger.warn(`Failed to get start token price for ${startTokenAddress}, using default minProfit = 1`);
+        return 1n;
+      }
+
+      // Calculate gas value in WBNB (WBNB has 18 decimals)
+      // gasValueWBNB = gasValueWei / 1e18
+      const gasValueWBNB = Number(gasValueWei) / 1e18;
+
+      // Calculate dollar value
+      const dollarValue = gasValueWBNB * wbnbPrice;
+
+      // Calculate minProfit in token units: dollarValue / startTokenPrice
+      const minProfitTokens = dollarValue / startTokenPrice;
+
+      // Get start token decimals
+      const startTokenDecimals = await this.decimalCache.getDecimals(startTokenAddress);
+
+      // Convert to token units with correct decimals
+      // minProfitWei = minProfitTokens * 10^decimals
+      const minProfitWei = BigInt(Math.ceil(minProfitTokens * Math.pow(10, startTokenDecimals)));
+
+      this.logger.debug(
+        `Calculated minProfit: gasUsed=${gasUsed}, gasPrice=${ethers.formatUnits(gasPriceWei, "gwei")} gwei, ` +
+        `wbnbPrice=$${wbnbPrice.toFixed(2)}, startTokenPrice=$${startTokenPrice.toFixed(2)}, ` +
+        `dollarValue=$${dollarValue.toFixed(4)}, minProfit=${ethers.formatUnits(minProfitWei, startTokenDecimals)} tokens (${minProfitWei.toString()} wei)`
+      );
+
+      return minProfitWei;
+    } catch (error: any) {
+      this.logger.warn(`Failed to calculate minProfit: ${error.message}, using default minProfit = 1`);
+      return 1n;
     }
   }
 
