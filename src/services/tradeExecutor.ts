@@ -303,7 +303,12 @@ export class TradeExecutor extends EventEmitter {
             this.logger.info(`[${cycleId}] Transaction hash: ${txHash}`);
           }
         } catch (error: any) {
-          this.logger.warn(`[${cycleId}] Failed to fetch tx hash from bundle: ${error.message || error}`);
+          const errorMessage = error.message || error;
+          if (errorMessage.includes('Bundle không được confirm')) {
+            this.logger.warn(`[${cycleId}] Bundle không được confirm: ${res.data.result}`);
+          } else {
+            this.logger.warn(`[${cycleId}] Failed to fetch tx hash from bundle: ${errorMessage}`);
+          }
         }
       }
 
@@ -382,6 +387,7 @@ export class TradeExecutor extends EventEmitter {
    * 
    * @param bundleHash Bundle hash from bundle submission result
    * @returns First transaction hash from the bundle, or undefined if not available
+   * @throws Error if bundle is not submitted or not confirmed
    */
   private async getTxHashFromBundle(bundleHash: string): Promise<string | undefined> {
     try {
@@ -391,6 +397,11 @@ export class TradeExecutor extends EventEmitter {
           timeout: 10000,
         }
       );
+
+      // Check if bundle is submitted and confirmed
+      if (response.data?.submitted === false || response.data?.confirmed === false) {
+        throw new Error('Bundle không được confirm');
+      }
 
       if (response.data?.txs && Array.isArray(response.data.txs) && response.data.txs.length > 0) {
         return response.data.txs[0].tx_hash;
