@@ -9,13 +9,14 @@ import winston from 'winston';
 import { TradeExecutor, BundleConfig, ArbitrageContractConfig } from './tradeExecutor.js';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { ARBITRAGE_CONTRACT_ABI } from '../constants.js';
+import { WalletPool } from '../wallet/walletPool.js';
 
 // Mock dependencies
 vi.mock('axios');
 
 describe('TradeExecutor', () => {
   let executor: TradeExecutor;
-  let wallet: ethers.Wallet;
+  let walletPool: WalletPool;
   let mockLogger: winston.Logger;
   let provider: ethers.JsonRpcProvider;
   let bundleConfig: BundleConfig;
@@ -50,7 +51,12 @@ describe('TradeExecutor', () => {
     });
 
     // Create wallet
-    wallet = new ethers.Wallet('0x' + '1'.repeat(64), provider);
+    const wallet = new ethers.Wallet('0x' + '1'.repeat(64), provider);
+
+    // Create WalletPool với single wallet
+    walletPool = new WalletPool([wallet], provider, undefined, {
+      logger: mockLogger,
+    });
 
     // Bundle config
     bundleConfig = {
@@ -68,7 +74,7 @@ describe('TradeExecutor', () => {
 
     // Create executor
     executor = new TradeExecutor(
-      wallet,
+      walletPool,
       mockLogger,
       bundleConfig,
       contractConfig
