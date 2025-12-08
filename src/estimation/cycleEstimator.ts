@@ -102,7 +102,7 @@ export class CycleEstimator {
       // Log error with context
       this.logger.error(
         `Failed to estimate amount out for cycle ${cycleId}:`,
-        error instanceof Error ? error.message : String(error)
+        error
       );
       throw error;
     }

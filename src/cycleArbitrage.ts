@@ -296,7 +296,7 @@ export class CycleArbitrage {
           arbitrageBps: data.arbitrageBps,
         }).catch((error: any) => {
           // Log error but don't break execution flow
-          this.logger.error('[Telegram] Notification error:', error?.message || String(error));
+          this.logger.error('[Telegram] Notification error:', error);
         });
       }
     });
@@ -618,7 +618,7 @@ export class CycleArbitrage {
 
       this.logger.info('✓ Cycle Arbitrage stopped successfully');
     } catch (error: any) {
-      this.logger.error('Error during shutdown:', error?.message || String(error));
+      this.logger.error('Error during shutdown:', error);
       throw error;
     }
   }

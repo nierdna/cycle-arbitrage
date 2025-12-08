@@ -58,7 +58,7 @@ export class TelegramNotifier {
       await this.sendMessage(message);
       this.logger.info(`[Telegram] Execution notification sent for cycle ${data.cycleId}`);
     } catch (error: any) {
-      this.logger.error(`[Telegram] Failed to send notification:`, error?.message || String(error));
+      this.logger.error(`[Telegram] Failed to send notification:`, error);
       // Don't throw - notification failure shouldn't break execution flow
     }
   }
