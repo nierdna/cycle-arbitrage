@@ -479,7 +479,7 @@ export class CycleArbitrage {
         } catch (error: any) {
           this.logger.error(
             `[${data.cycleId}] Failed to execute trade:`,
-            error instanceof Error ? error.message : String(error)
+            error
           );
           // Don't throw - allow scanning to continue
         }
