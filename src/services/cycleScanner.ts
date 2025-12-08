@@ -3,13 +3,13 @@
  * Handles continuous scanning of a single cycle for arbitrage opportunities
  */
 
-import { ethers } from 'ethers';
-import winston from 'winston';
-import { EventEmitter } from 'events';
-import { AmountOptimizer } from '../optimization/amountOptimizer.js';
-import { CycleWithState } from '../cycleArbitrage.js';
-import { CycleFormatter } from './cycleFormatter.js';
-import { MinProfitCalculator } from './minProfitCalculator.js';
+import { ethers } from "ethers";
+import winston from "winston";
+import { EventEmitter } from "events";
+import { AmountOptimizer } from "../optimization/amountOptimizer.js";
+import { CycleWithState } from "../cycleArbitrage.js";
+import { CycleFormatter } from "./cycleFormatter.js";
+import { MinProfitCalculator } from "./minProfitCalculator.js";
 
 export interface ScanOptions {
   minArbitrageBps?: number; // Deprecated: kept for backward compatibility, not used anymore
@@ -39,7 +39,10 @@ export class CycleScanner extends EventEmitter {
   constructor(
     private cycleId: string,
     private cycle: CycleWithState,
-    private estimateAmountOut: (cycleId: string, amountIn: bigint) => Promise<bigint>,
+    private estimateAmountOut: (
+      cycleId: string,
+      amountIn: bigint
+    ) => Promise<bigint>,
     private options: ScanOptions,
     private minProfitCalculator: MinProfitCalculator,
     private amountOptimizer?: AmountOptimizer,
@@ -65,11 +68,18 @@ export class CycleScanner extends EventEmitter {
     const maxAmountIn = this.cycle.maxAmountIn;
 
     // Initial optimization if enabled
-    if (this.options.optimizeAmountIn && this.amountOptimizer && this.isRunning) {
+    if (
+      this.options.optimizeAmountIn &&
+      this.amountOptimizer &&
+      this.isRunning
+    ) {
       try {
-      await this.performInitialOptimization(minAmountIn, maxAmountIn);
+        await this.performInitialOptimization(minAmountIn, maxAmountIn);
       } catch (error) {
-        this.logger?.error(`[${this.cycleId}] Initial optimization failed:`, error);
+        this.logger?.error(
+          `[${this.cycleId}] Initial optimization failed:`,
+          error
+        );
       }
     }
 
@@ -77,19 +87,19 @@ export class CycleScanner extends EventEmitter {
     while (this.isRunning) {
       try {
         await this.performScan(minAmountIn, maxAmountIn);
-        
+
         // Check if still running before sleeping
         if (this.isRunning) {
-        await this.sleep(this.options.scanIntervalMs);
+          await this.sleep(this.options.scanIntervalMs);
         }
       } catch (error) {
         this.logger?.error(`[${this.cycleId}] Scan error:`, error);
-        
+
         // Only sleep if still running
         if (this.isRunning) {
-        await this.sleep(5000);
+          await this.sleep(5000);
+        }
       }
-    }
     }
 
     this.logger?.info(`[${this.cycleId}] Scanner stopped`);
@@ -106,7 +116,7 @@ export class CycleScanner extends EventEmitter {
 
     this.logger?.info(`[${this.cycleId}] Stopping scanner...`);
     this.isRunning = false;
-    this.emit('stopped', { cycleId: this.cycleId });
+    this.emit("stopped", { cycleId: this.cycleId });
   }
 
   /**
@@ -126,7 +136,9 @@ export class CycleScanner extends EventEmitter {
     if (!this.amountOptimizer || !this.logger) return;
 
     this.logger.debug(
-      `[${this.cycleId}] Finding optimal amountIn (range: ${ethers.formatEther(minAmountIn)} - ${ethers.formatEther(maxAmountIn)})...`
+      `[${this.cycleId}] Finding optimal amountIn (range: ${ethers.formatEther(
+        minAmountIn
+      )} - ${ethers.formatEther(maxAmountIn)})...`
     );
 
     try {
@@ -141,20 +153,23 @@ export class CycleScanner extends EventEmitter {
       this.currentAmountIn = this.optimalAmountIn;
 
       // Emit optimization result event
-      this.emit('optimization-result', {
+      this.emit("optimization-result", {
         cycleId: this.cycleId,
         amountIn: this.optimalAmountIn,
         arbitrageBps: this.optimalArbBps,
       });
 
       this.logger.debug(
-        `[${this.cycleId}] Optimal: ${ethers.formatEther(this.optimalAmountIn)} tokens, ` +
-        `arb: ${this.optimalArbBps.toFixed(2)} bps`
+        `[${this.cycleId}] Optimal: ${ethers.formatEther(
+          this.optimalAmountIn
+        )} tokens, ` + `arb: ${this.optimalArbBps.toFixed(2)} bps`
       );
     } catch (error) {
       this.logger.error(`[${this.cycleId}] Optimization failed:`, error);
       this.logger.info(
-        `[${this.cycleId}] Using default amountIn: ${ethers.formatEther(this.options.amountIn)}`
+        `[${this.cycleId}] Using default amountIn: ${ethers.formatEther(
+          this.options.amountIn
+        )}`
       );
     }
   }
@@ -167,7 +182,7 @@ export class CycleScanner extends EventEmitter {
     maxAmountIn: bigint
   ): Promise<void> {
     // Emit scan event
-    this.emit('scan', { cycleId: this.cycleId });
+    this.emit("scan", { cycleId: this.cycleId });
 
     // Re-optimize periodically if enabled
     if (
@@ -180,19 +195,20 @@ export class CycleScanner extends EventEmitter {
     }
 
     // Estimate amount out
-    const amountOut = await this.estimateAmountOut(this.cycleId, this.currentAmountIn);
+    const amountOut = await this.estimateAmountOut(
+      this.cycleId,
+      this.currentAmountIn
+    );
 
     // Calculate profit and arbitrage in bps
     const profit = amountOut - this.currentAmountIn;
-    const arbitrageBps = Number(
-      (profit * BigInt(1e4)) / this.currentAmountIn
-    );
+    const arbitrageBps = Number((profit * BigInt(1e4)) / this.currentAmountIn);
 
     this.scanCount++;
 
     // Emit arbitrage BPS event for historical chart (every 1000 scans)
     if (this.scanCount % 1000 === 0) {
-      this.emit('arbitrage-bps', {
+      this.emit("arbitrage-bps", {
         cycleId: this.cycleId,
         arbitrageBps,
       });
@@ -212,16 +228,25 @@ export class CycleScanner extends EventEmitter {
         amountIn: this.currentAmountIn,
         amountOut,
         minProfit,
-        optimalAmountIn: this.options.optimizeAmountIn ? this.optimalAmountIn : undefined,
-        optimalArbBps: this.options.optimizeAmountIn ? this.optimalArbBps : undefined,
+        optimalAmountIn: this.options.optimizeAmountIn
+          ? this.optimalAmountIn
+          : undefined,
+        optimalArbBps: this.options.optimizeAmountIn
+          ? this.optimalArbBps
+          : undefined,
       };
 
       await this.handleOpportunity(result);
-    } else if (this.scanCount % 10000 === 0) {
+    } else if (this.scanCount % 1000 === 0) {
       this.logger?.info(
         `[${this.cycleId}] Scanning... ` +
-        `(arb: ${arbitrageBps.toFixed(2)} bps, profit: ${ethers.formatEther(profit)}, ` +
-        `minProfit: ${ethers.formatEther(minProfit)}, amount: ${ethers.formatEther(this.currentAmountIn)}, scans: ${this.scanCount})`
+        `(arb: ${arbitrageBps.toFixed(2)} bps, profit: ${ethers.formatEther(
+          profit
+        )}, ` +
+        `minProfit: ${ethers.formatEther(
+          minProfit
+        )}, amount: ${ethers.formatEther(this.currentAmountIn)}, scans: ${this.scanCount
+        })`
       );
     }
   }
@@ -249,15 +274,16 @@ export class CycleScanner extends EventEmitter {
         this.currentAmountIn = this.optimalAmountIn;
 
         // Emit optimization result event
-        this.emit('optimization-result', {
+        this.emit("optimization-result", {
           cycleId: this.cycleId,
           amountIn: this.optimalAmountIn,
           arbitrageBps: this.optimalArbBps,
         });
 
         this.logger.debug(
-          `[${this.cycleId}] Re-optimized: ${ethers.formatEther(this.optimalAmountIn)} tokens, ` +
-          `arb: ${this.optimalArbBps.toFixed(2)} bps`
+          `[${this.cycleId}] Re-optimized: ${ethers.formatEther(
+            this.optimalAmountIn
+          )} tokens, ` + `arb: ${this.optimalArbBps.toFixed(2)} bps`
         );
       }
     } catch (error) {
@@ -281,7 +307,7 @@ export class CycleScanner extends EventEmitter {
     }
 
     // Emit opportunity event with full data (including minProfit)
-    this.emit('opportunity', {
+    this.emit("opportunity", {
       cycleId: this.cycleId,
       arbitrageBps: result.arbitrageBps,
       amountIn: result.amountIn,
@@ -295,7 +321,7 @@ export class CycleScanner extends EventEmitter {
     const timestamp = new Date().toISOString();
     const cyclePath = this.formatter.formatCyclePath(this.cycle.tokens);
 
-    this.logger.info('🎯 Arbitrage detected!', {
+    this.logger.info("🎯 Arbitrage detected!", {
       cycle: cyclePath,
       cycleId: this.cycleId,
       arbitrageBps: result.arbitrageBps.toFixed(2),
@@ -314,4 +340,3 @@ export class CycleScanner extends EventEmitter {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
-
