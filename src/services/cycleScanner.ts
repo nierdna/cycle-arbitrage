@@ -24,6 +24,7 @@ export interface ScanResult {
   arbitrageBps: number;
   amountIn: bigint;
   amountOut: bigint;
+  minProfit: bigint; // Min profit calculated for this cycle
   optimalAmountIn?: bigint;
   optimalArbBps?: number;
 }
@@ -210,6 +211,7 @@ export class CycleScanner extends EventEmitter {
         arbitrageBps,
         amountIn: this.currentAmountIn,
         amountOut,
+        minProfit,
         optimalAmountIn: this.options.optimizeAmountIn ? this.optimalAmountIn : undefined,
         optimalArbBps: this.options.optimizeAmountIn ? this.optimalArbBps : undefined,
       };
@@ -278,12 +280,13 @@ export class CycleScanner extends EventEmitter {
       );
     }
 
-    // Emit opportunity event with full data
+    // Emit opportunity event with full data (including minProfit)
     this.emit('opportunity', {
       cycleId: this.cycleId,
       arbitrageBps: result.arbitrageBps,
       amountIn: result.amountIn,
       amountOut: result.amountOut,
+      minProfit: result.minProfit,
       optimalAmountIn: result.optimalAmountIn,
       optimalAmountOut: optimalAmountOut,
       optimalArbBps: result.optimalArbBps,

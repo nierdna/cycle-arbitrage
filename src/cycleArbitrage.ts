@@ -263,7 +263,8 @@ export class CycleArbitrage {
       this.logger,
       bundleConfig,
       contractConfig,
-      this.minProfitCalculator
+      this.minProfitCalculator,
+      this.gasPriceService
     );
 
     // Subscribe to TradeExecutor events
@@ -468,7 +469,8 @@ export class CycleArbitrage {
             data.cycleId,
             cycle,
             executeAmount,
-            executeAmountOut
+            executeAmountOut,
+            data.minProfit // Pass minProfit from scanner
           );
         } catch (error: any) {
           this.logger.error(

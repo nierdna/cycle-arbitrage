@@ -23,6 +23,7 @@ import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
 import { getTokenPriceInUSDT } from '../utils/poolLiquidityHelper.js';
 import { DecimalCache } from '../tokens/decimalCache.js';
 import { MinProfitCalculator } from './minProfitCalculator.js';
+import { GasPriceService } from './gasPriceService.js';
 
 export interface BundleConfig {
   rpcUrl: string;
@@ -57,7 +58,8 @@ export class TradeExecutor extends EventEmitter {
     private logger: winston.Logger,
     private bundleConfig: BundleConfig,
     contractConfig: ArbitrageContractConfig,
-    private minProfitCalculator?: MinProfitCalculator
+    private minProfitCalculator?: MinProfitCalculator,
+    private gasPriceService?: GasPriceService
   ) {
     super(); // Call EventEmitter constructor
     // Save contract address
@@ -96,13 +98,15 @@ export class TradeExecutor extends EventEmitter {
    * 
    * IMPORTANT: Reverse pools and fees order for flash loan logic
    * 
+   * @param minProfit Optional minProfit calculated by scanner. If provided, will be used instead of calculating.
    * @returns Transaction hash of the first transaction in the bundle, or undefined if not available
    */
   async executeCycle(
     cycleId: string,
     cycle: CycleWithState,
     amountIn: bigint,
-    estimatedOut: bigint
+    estimatedOut: bigint,
+    minProfit?: bigint
   ): Promise<string | undefined> {
     const startTime = Date.now();
     const now = Date.now();
@@ -156,16 +160,43 @@ export class TradeExecutor extends EventEmitter {
       // Contract expects exact output amount from Pool1 (ví dụ: 101 USDT)
       const exactOutputAmount = estimatedOut;
 
-      // Calculate min profit based on gas cost
-      const maxPriorityFeePerGas = (await this.wallet.provider?.getFeeData())?.gasPrice || ethers.parseUnits("0.05", "gwei");
+      // Get gas prices for transaction
+      // Use GasPriceService if available, otherwise fallback to provider
+      let maxPriorityFeePerGas: bigint;
+      if (this.gasPriceService) {
+        maxPriorityFeePerGas = this.gasPriceService.getGasPrice();
+        this.logger.debug(
+          `[${cycleId}] Using gas price from GasPriceService: ${ethers.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`
+        );
+      } else {
+        // Fallback: get from provider
+        const feeData = await this.wallet.provider?.getFeeData();
+        maxPriorityFeePerGas = feeData?.gasPrice || ethers.parseUnits("0.05", "gwei");
+        this.logger.debug(
+          `[${cycleId}] Using gas price from provider (fallback): ${ethers.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`
+        );
+      }
       const maxFeePerGas = ethers.parseUnits("3", "gwei");
 
-      // Use MinProfitCalculator if available, otherwise fallback to local calculation
-      let minProfit: bigint;
-      if (this.minProfitCalculator) {
-        minProfit = await this.minProfitCalculator.calculateMinProfit(cycle, poolCount);
+      // Use minProfit from scanner if provided, otherwise calculate
+      let calculatedMinProfit: bigint;
+      if (minProfit !== undefined) {
+        // Use minProfit from scanner (already calculated)
+        calculatedMinProfit = minProfit;
+        this.logger.debug(
+          `[${cycleId}] Using minProfit from scanner: ${ethers.formatEther(calculatedMinProfit)} tokens`
+        );
       } else {
-        minProfit = await this.calculateMinProfit(poolCount, cycle, maxPriorityFeePerGas);
+        // Fallback: calculate minProfit if not provided
+        if (this.minProfitCalculator) {
+          calculatedMinProfit = await this.minProfitCalculator.calculateMinProfit(cycle, poolCount);
+        } else {
+          calculatedMinProfit = await this.calculateMinProfit(poolCount, cycle, maxPriorityFeePerGas);
+        }
+
+        this.logger.debug(
+          `[${cycleId}] Calculated minProfit (fallback): ${ethers.formatEther(calculatedMinProfit)} tokens`
+        );
       }
 
       // Tip amount (optional)
@@ -189,7 +220,7 @@ export class TradeExecutor extends EventEmitter {
           exactOutputAmount,  // Exact output amount from Pool1 (uint256, số dương)
           sqrtPriceLimits[0],
           sqrtPriceLimits[1],
-          minProfit,
+          calculatedMinProfit,
           tipAmount,
         ]);
       } else {
@@ -206,7 +237,7 @@ export class TradeExecutor extends EventEmitter {
           sqrtPriceLimits[0],
           sqrtPriceLimits[1],
           sqrtPriceLimits[2],
-          minProfit,
+          calculatedMinProfit,
           tipAmount,
         ]);
       }
