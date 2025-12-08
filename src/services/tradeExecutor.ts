@@ -20,9 +20,7 @@ import { EventEmitter } from 'events';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { MIN_SQRT_RATIO, MAX_SQRT_RATIO } from '../constants.js';
 import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
-import { getTokenPriceInUSDT } from '../utils/poolLiquidityHelper.js';
-import { DecimalCache } from '../tokens/decimalCache.js';
-import { MinProfitCalculator } from './minProfitCalculator.js';
+import { WalletPool } from '../wallet/walletPool.js';
 import { GasPriceService } from './gasPriceService.js';
 
 export interface BundleConfig {
@@ -39,56 +37,27 @@ export interface ArbitrageContractConfig {
 }
 
 export class TradeExecutor extends EventEmitter {
-  private arbitrageContract: ethers.Contract;
   private contractAddress: string;
+  private contractABI: any[];
   private executingCycles: Map<string, number> = new Map(); // Track cycles với timestamp: cycleId -> timestamp
-  private wallet: NonceCachedWallet; // Use NonceCachedWallet instead of ethers.Wallet
+  private walletPool: WalletPool; // Wallet pool for rotation
   private readonly LOCK_DURATION_MS = 1000; // Lock duration: 1 second
-  private decimalCache: DecimalCache;
-
-  // WBNB address on BSC
-  private readonly WBNB_ADDRESS = '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c';
-
-  // Gas used constants
-  private readonly GAS_USED_2_POOLS = 231398;
-  private readonly GAS_USED_3_POOLS = 321410;
 
   constructor(
-    wallet: ethers.Wallet | NonceCachedWallet,
+    walletPool: WalletPool,
     private logger: winston.Logger,
     private bundleConfig: BundleConfig,
     contractConfig: ArbitrageContractConfig,
-    private minProfitCalculator?: MinProfitCalculator,
     private gasPriceService?: GasPriceService
   ) {
     super(); // Call EventEmitter constructor
-    // Save contract address
+    // Save contract config
     this.contractAddress = contractConfig.contractAddress;
+    this.contractABI = contractConfig.contractABI;
+    this.walletPool = walletPool;
 
-    // Convert to NonceCachedWallet nếu chưa phải
-    if (wallet instanceof NonceCachedWallet) {
-      this.wallet = wallet;
-    } else {
-      // Create NonceCachedWallet từ ethers.Wallet
-      const provider = wallet.provider || new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
-      this.wallet = new NonceCachedWallet(wallet.privateKey, provider, {
-        syncIntervalMs: this.bundleConfig.nonceSyncIntervalMs,
-        logger: this.logger,
-      });
-    }
-
-    // Initialize DecimalCache for price lookups
-    const provider = this.wallet.provider || new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
-    this.decimalCache = new DecimalCache(provider);
-    this.decimalCache.load().catch((error) => {
-      this.logger.warn(`Failed to load decimal cache: ${error.message}`);
-    });
-
-    // Create contract instance
-    this.arbitrageContract = new ethers.Contract(
-      contractConfig.contractAddress,
-      contractConfig.contractABI,
-      this.wallet
+    this.logger.info(
+      `[TradeExecutor] Initialized with wallet pool (${walletPool.getPoolSize()} wallets)`
     );
   }
 
@@ -131,6 +100,20 @@ export class TradeExecutor extends EventEmitter {
     // Set lock with timestamp
     this.executingCycles.set(cycleId, now);
 
+    // Acquire wallet from pool
+    const walletLock = this.walletPool.acquireWallet();
+    if (!walletLock) {
+      this.logger.warn(
+        `[${cycleId}] All wallets are locked. Skipping execution. (Locked: ${this.walletPool.getLockedCount()}/${this.walletPool.getPoolSize()})`
+      );
+      return undefined;
+    }
+
+    const wallet = walletLock.wallet;
+    const walletAddress = wallet.address;
+
+    this.logger.debug(`[${cycleId}] Using wallet: ${walletAddress}`);
+
     try {
       const poolCount = cycle.poolAddresses.length;
 
@@ -170,7 +153,7 @@ export class TradeExecutor extends EventEmitter {
         );
       } else {
         // Fallback: get from provider
-        const feeData = await this.wallet.provider?.getFeeData();
+        const feeData = await wallet.provider?.getFeeData();
         maxPriorityFeePerGas = feeData?.gasPrice || ethers.parseUnits("0.05", "gwei");
         this.logger.debug(
           `[${cycleId}] Using gas price from provider (fallback): ${ethers.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`
@@ -178,35 +161,31 @@ export class TradeExecutor extends EventEmitter {
       }
       const maxFeePerGas = ethers.parseUnits("3", "gwei");
 
-      // Use minProfit from scanner if provided, otherwise calculate
-      let calculatedMinProfit: bigint;
-      if (minProfit !== undefined) {
-        // Use minProfit from scanner (already calculated)
-        calculatedMinProfit = minProfit;
-        this.logger.debug(
-          `[${cycleId}] Using minProfit from scanner: ${ethers.formatEther(calculatedMinProfit)} tokens`
-        );
-      } else {
-        // Fallback: calculate minProfit if not provided
-        if (this.minProfitCalculator) {
-          calculatedMinProfit = await this.minProfitCalculator.calculateMinProfit(cycle, poolCount);
-        } else {
-          calculatedMinProfit = await this.calculateMinProfit(poolCount, cycle, maxPriorityFeePerGas);
-        }
-
-        this.logger.debug(
-          `[${cycleId}] Calculated minProfit (fallback): ${ethers.formatEther(calculatedMinProfit)} tokens`
-        );
+      // minProfit must be provided from scanner
+      if (minProfit === undefined) {
+        throw new Error(`[${cycleId}] minProfit is required but not provided`);
       }
+
+      const calculatedMinProfit = minProfit;
+      this.logger.debug(
+        `[${cycleId}] Using minProfit from scanner: ${ethers.formatEther(calculatedMinProfit)} tokens`
+      );
 
       // Tip amount (optional)
       const tipAmount = ethers.parseEther('0.00001');
 
       // Get nonce từ cache
-      const nonce = await this.wallet.getCachedNonce();
+      const nonce = await wallet.getCachedNonce();
+
+      // Create contract instance với wallet từ pool
+      const arbitrageContract = new ethers.Contract(
+        this.contractAddress,
+        this.contractABI,
+        wallet
+      );
 
       // Encode function call based on pool count
-      const iface = this.arbitrageContract.interface;
+      const iface = arbitrageContract.interface;
       let data: string;
 
       if (poolCount === 2) {
@@ -258,10 +237,10 @@ export class TradeExecutor extends EventEmitter {
         chainId: 56, // BSC Mainnet
       };
 
-      this.logger.info(`[${cycleId}] Signing transaction...`);
+      this.logger.info(`[${cycleId}] Signing transaction with wallet ${walletAddress}...`);
 
       // Sign transaction
-      const signedTx = await this.wallet.signTransaction(tx);
+      const signedTx = await wallet.signTransaction(tx);
 
       // Create bundle
       const bundle: any = {
@@ -274,7 +253,7 @@ export class TradeExecutor extends EventEmitter {
 
       // Sign bundle with 48spSign
       this.logger.info(`[${cycleId}] Signing bundle with 48spSign...`);
-      const bundleSign = this.signBundle48sp([signedTx]);
+      const bundleSign = this.signBundle48sp([signedTx], wallet);
       bundle['48spSign'] = bundleSign;
 
       // Submit bundle
@@ -299,18 +278,18 @@ export class TradeExecutor extends EventEmitter {
 
         // Check nếu error là nonce mismatch
         if (errorMsg.includes('nonce') || errorMsg.includes('replacement') || errorMsg.includes('already known')) {
-          this.logger.warn(`[${cycleId}] Nonce error detected, syncing nonce...`);
-          await this.wallet.syncNonce();
+          this.logger.warn(`[${cycleId}] Nonce error detected, syncing nonce for wallet ${walletAddress}...`);
+          await wallet.syncNonce();
           // Không retry tự động, để caller quyết định
         }
 
         throw new Error(`Bundle submission failed: ${errorMsg}`);
       }
 
-      this.logger.info(`[${cycleId}] ✓ Bundle submitted successfully`);
+      this.logger.info(`[${cycleId}] ✓ Bundle submitted successfully with wallet ${walletAddress}`);
 
       // Increment nonce sau khi submit thành công
-      this.wallet.incrementNonce();
+      wallet.incrementNonce();
 
       let txHash: string | undefined;
 
@@ -357,6 +336,10 @@ export class TradeExecutor extends EventEmitter {
       this.logger.error(`[${cycleId}] ✗ Bundle submission failed after ${totalTime}ms:`, error.message || error);
       throw error;
     } finally {
+      // Release wallet back to pool
+      if (walletLock) {
+        this.walletPool.releaseWallet(walletAddress);
+      }
       // Keep timestamp in map for lock duration
       // Cleanup will handle removal after lock duration expires
       // This ensures cycle is locked for 1s even after completion/error
@@ -454,77 +437,6 @@ export class TradeExecutor extends EventEmitter {
   }
 
   /**
-   * Calculate minimum profit based on gas cost
-   * Formula: minProfit = (gasUsed * gasPrice * wbnbPrice) / startTokenPrice
-   * 
-   * @param poolCount Number of pools (2 or 3)
-   * @param cycle Cycle information to get start token address and price
-   * @returns Minimum profit in start token units (with correct decimals)
-   */
-  private async calculateMinProfit(poolCount: number, cycle: CycleWithState, gasPriceWei: bigint): Promise<bigint> {
-    try {
-      // Get gas used based on pool count
-      const gasUsed = poolCount === 2 ? this.GAS_USED_2_POOLS : this.GAS_USED_3_POOLS;
-
-      // Get gas price (use same logic as transaction: maxFeePerGas = 3 gwei)
-      // This should match the gas price used in the actual transaction
-
-      // Calculate gas value in wei
-      const gasValueWei = BigInt(gasUsed) * gasPriceWei;
-
-      // Get provider
-      const provider = this.wallet.provider || new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
-
-      // Get WBNB price in USDT
-      const wbnbPrice = await getTokenPriceInUSDT(provider, this.WBNB_ADDRESS, this.decimalCache);
-
-      if (!wbnbPrice || wbnbPrice <= 0) {
-        this.logger.warn('Failed to get WBNB price, using default minProfit = 1');
-        return 1n;
-      }
-
-      // Get start token address (first token in cycle)
-      const startTokenAddress = cycle.addresses[0];
-
-      // Get start token price in USDT
-      const startTokenPrice = await getTokenPriceInUSDT(provider, startTokenAddress, this.decimalCache);
-
-      if (!startTokenPrice || startTokenPrice <= 0) {
-        this.logger.warn(`Failed to get start token price for ${startTokenAddress}, using default minProfit = 1`);
-        return 1n;
-      }
-
-      // Calculate gas value in WBNB (WBNB has 18 decimals)
-      // gasValueWBNB = gasValueWei / 1e18
-      const gasValueWBNB = Number(gasValueWei) / 1e18;
-
-      // Calculate dollar value
-      const dollarValue = gasValueWBNB * wbnbPrice;
-
-      // Calculate minProfit in token units: dollarValue / startTokenPrice
-      const minProfitTokens = dollarValue / startTokenPrice;
-
-      // Get start token decimals
-      const startTokenDecimals = await this.decimalCache.getDecimals(startTokenAddress);
-
-      // Convert to token units with correct decimals
-      // minProfitWei = minProfitTokens * 10^decimals
-      const minProfitWei = BigInt(Math.ceil(minProfitTokens * Math.pow(10, startTokenDecimals)));
-
-      this.logger.debug(
-        `Calculated minProfit: gasUsed=${gasUsed}, gasPrice=${ethers.formatUnits(gasPriceWei, "gwei")} gwei, ` +
-        `wbnbPrice=$${wbnbPrice.toFixed(2)}, startTokenPrice=$${startTokenPrice.toFixed(2)}, ` +
-        `dollarValue=$${dollarValue.toFixed(4)}, minProfit=${ethers.formatUnits(minProfitWei, startTokenDecimals)} tokens (${minProfitWei.toString()} wei)`
-      );
-
-      return minProfitWei;
-    } catch (error: any) {
-      this.logger.warn(`Failed to calculate minProfit: ${error.message}, using default minProfit = 1`);
-      return 1n;
-    }
-  }
-
-  /**
    * Sign bundle with 48spSign according to 48.club docs
    * Based on working JavaScript example
    * 
@@ -536,9 +448,10 @@ export class TradeExecutor extends EventEmitter {
    * 5. Format signature: r (32 bytes) + s (32 bytes) + v (1 byte, recovery id 0 or 1)
    * 
    * @param rawTxs Array of raw signed transactions (RLP-encoded hex strings)
+   * @param wallet Wallet to use for signing
    * @returns Hex string signature (0x...)
    */
-  private signBundle48sp(rawTxs: string[]): string {
+  private signBundle48sp(rawTxs: string[], wallet: NonceCachedWallet): string {
     // 1. Hash từng tx và concat
     let concatenatedHashes = new Uint8Array(0);
 
@@ -562,7 +475,7 @@ export class TradeExecutor extends EventEmitter {
     const finalHashBytes = ethers.getBytes(finalHash);
 
     // 3. Sign với private key (sign bytes trực tiếp)
-    const signature = this.wallet.signingKey.sign(finalHashBytes);
+    const signature = wallet.signingKey.sign(finalHashBytes);
 
     // 4. Format signature: r (32 bytes) + s (32 bytes) + v (1 byte)
     // QUAN TRỌNG: recovery id phải là 0 hoặc 1, không phải 27 hoặc 28

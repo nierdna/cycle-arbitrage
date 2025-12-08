@@ -13,9 +13,11 @@
 
 import 'dotenv/config';
 import { ethers } from 'ethers';
+import winston from 'winston';
 import { CycleArbitrage } from '../src/cycleArbitrage.js';
-import { TokenRegistry, loadTokensFromConfig, loadArbitrageConfig } from '../src/tokens/index.js';
+import { TokenRegistry, loadTokensFromConfig, loadArbitrageConfig, loadWalletKeysFromConfig } from '../src/tokens/index.js';
 import { BundleConfig } from '../src/services/index.js';
+import { WalletPool } from '../src/wallet/index.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
 
 async function main() {
@@ -92,8 +94,53 @@ async function main() {
   const arbitrage = new CycleArbitrage(provider, tokenRegistry, arbitrageOptions);
 
   // Optional: Set execution with arbitrage contract (bundle mode only)
-  if (process.env.PRIVATE_KEY) {
-    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+  // Load wallet keys from config file first, then fallback to env variables
+  let privateKeys: string[] = [];
+
+  try {
+    // Try to load from config file
+    privateKeys = loadWalletKeysFromConfig(configPath);
+    if (privateKeys.length > 0) {
+      console.log(`Loaded ${privateKeys.length} wallet key(s) from config file\n`);
+    }
+  } catch (error) {
+    console.warn('Failed to load wallet keys from config file:', error);
+  }
+
+  // Fallback to env variables if config file doesn't have wallet keys
+  if (privateKeys.length === 0) {
+    privateKeys = [
+      process.env.PRIVATE_KEY,
+      process.env.PRIVATE_KEY_1,
+      process.env.PRIVATE_KEY_2,
+      process.env.PRIVATE_KEY_3,
+    ].filter(Boolean) as string[];
+
+    if (privateKeys.length > 0) {
+      console.log(`Loaded ${privateKeys.length} wallet key(s) from environment variables\n`);
+    }
+  }
+
+  if (privateKeys.length > 0) {
+    // Create wallets from private keys
+    const wallets = privateKeys.map((pk) => new ethers.Wallet(pk, provider));
+
+    // Create WalletPool with nonce caching
+    const walletPool = new WalletPool(
+      wallets,
+      provider,
+      {
+        syncIntervalMs: parseInt(process.env.NONCE_SYNC_INTERVAL_MS || '30000'),
+        logger: winston.createLogger({
+          level: 'info',
+          format: winston.format.simple(),
+          transports: [new winston.transports.Console()],
+        }),
+      },
+      {
+        lockDurationMs: parseInt(process.env.WALLET_LOCK_DURATION_MS || '2000'),
+      }
+    );
 
     // Bundle configuration
     const bundleConfig: BundleConfig = {
@@ -101,6 +148,7 @@ async function main() {
       apiUrl: process.env.BUNDLE_API_URL || 'https://puissant-builder.48.club/',
       maxBlocks: parseInt(process.env.BUNDLE_MAX_BLOCKS || '50'),
       maxSeconds: parseInt(process.env.BUNDLE_MAX_SECONDS || '120'),
+      nonceSyncIntervalMs: parseInt(process.env.NONCE_SYNC_INTERVAL_MS || '30000'),
     };
 
     // Arbitrage contract address (deploy from triangle-arbitrage-contract)
@@ -113,8 +161,9 @@ async function main() {
       );
     }
 
-    arbitrage.setExecution(wallet, bundleConfig, arbitrageContractAddress);
-    console.log(`Wallet: ${wallet.address}`);
+    arbitrage.setExecution(walletPool, bundleConfig, arbitrageContractAddress);
+    console.log(`Wallet Pool: ${walletPool.getPoolSize()} wallet(s)`);
+    console.log(`  Addresses: ${walletPool.getWalletAddresses().join(', ')}`);
     console.log(`Arbitrage Contract: ${arbitrageContractAddress}`);
     console.log('⚠ Bundle execution mode enabled - will submit bundles!\n');
   } else {

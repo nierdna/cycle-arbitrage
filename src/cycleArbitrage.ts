@@ -26,6 +26,7 @@ import {
   TokenPriceService,
   MinProfitCalculator,
 } from './services/index.js';
+import { WalletPool } from './wallet/walletPool.js';
 import { CycleEstimator } from './estimation/cycleEstimator.js';
 import { TelegramNotifier, TelegramConfig } from './notifications/index.js';
 
@@ -246,10 +247,14 @@ export class CycleArbitrage {
 
 
   /**
-   * Set wallet and arbitrage contract for execution (bundle mode only)
+   * Set wallet pool and arbitrage contract for execution (bundle mode only)
+   * 
+   * @param walletPool WalletPool instance for wallet rotation
+   * @param bundleConfig Bundle configuration
+   * @param contractAddress Arbitrage contract address
    */
   setExecution(
-    wallet: ethers.Wallet,
+    walletPool: WalletPool,
     bundleConfig: BundleConfig,
     contractAddress: string
   ): void {
@@ -259,11 +264,10 @@ export class CycleArbitrage {
     };
 
     this.tradeExecutor = new TradeExecutor(
-      wallet,
+      walletPool,
       this.logger,
       bundleConfig,
       contractConfig,
-      this.minProfitCalculator,
       this.gasPriceService
     );
 

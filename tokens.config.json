@@ -50,7 +50,11 @@
     }
   ],
   "arbitrage": {
-    "discoveryFees": [100, 500, 2500, 10000]
+    "discoveryFees": [100, 500, 2500, 10000],
+    "walletKeys": [
+      ".keys/0x44C0fB0aB3ab89dF19ddE132F5AF869A52E8FA22.txt",
+      ".keys/0xD2E06a9AaE92dCFdbA8A2AECa1bC603e4Fd9cc50.txt"
+    ]
   }
 }
 

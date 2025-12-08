@@ -29,6 +29,7 @@ export interface ArbitrageConfig {
   maxHops?: number;
   gasPriceUpdateInterval?: number;
   tokenPriceUpdateInterval?: number;
+  walletKeys?: string[]; // List of paths to private key files (e.g., [".keys/0x1234...txt", ".keys/0x5678...txt"])
 }
 
 export interface TokensConfigFile {
@@ -199,5 +200,73 @@ export function loadArbitrageConfig(configPath?: string): ArbitrageConfig | unde
   }
 
   return arbitrageConfig;
+}
+
+/**
+ * Load wallet private keys from config file paths
+ * Each path points to a file containing a private key
+ * File naming convention: .keys/[walletaddress].txt
+ * 
+ * @param configPath Path to config file (default: tokens.config.json in project root)
+ * @returns Array of private keys (with 0x prefix) or empty array if not configured
+ * @throws Error if file not found, invalid JSON, or invalid private key format
+ */
+export function loadWalletKeysFromConfig(configPath?: string): string[] {
+  const arbitrageConfig = loadArbitrageConfig(configPath);
+  
+  if (!arbitrageConfig?.walletKeys || !Array.isArray(arbitrageConfig.walletKeys)) {
+    return [];
+  }
+
+  const privateKeys: string[] = [];
+  const defaultPath = join(process.cwd(), 'tokens.config.json');
+  const envPath = process.env.TOKENS_CONFIG_PATH;
+  const rawPath = configPath || envPath || defaultPath;
+  const configDir = resolve(rawPath, '..'); // Get directory containing config file
+
+  for (const keyPath of arbitrageConfig.walletKeys) {
+    // Resolve path relative to config file directory
+    const resolvedPath = resolve(configDir, keyPath);
+    
+    let fileContent: string;
+    try {
+      fileContent = readFileSync(resolvedPath, 'utf-8');
+    } catch (error) {
+      throw new Error(
+        `Failed to read wallet key file at ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    // Trim whitespace and newlines
+    const privateKey = fileContent.trim();
+
+    // Validate private key format
+    if (!privateKey) {
+      throw new Error(`Empty private key in file: ${resolvedPath}`);
+    }
+
+    // Ensure 0x prefix
+    const privateKeyWithPrefix = privateKey.startsWith('0x') ? privateKey : `0x${privateKey}`;
+
+    // Validate private key length (64 hex chars + 0x = 66 chars)
+    if (privateKeyWithPrefix.length !== 66) {
+      throw new Error(
+        `Invalid private key length in file ${resolvedPath}: expected 66 characters (0x + 64 hex), got ${privateKeyWithPrefix.length}`
+      );
+    }
+
+    // Validate hex format by trying to create wallet
+    try {
+      new ethers.Wallet(privateKeyWithPrefix);
+    } catch (error) {
+      throw new Error(
+        `Invalid private key format in file ${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    privateKeys.push(privateKeyWithPrefix);
+  }
+
+  return privateKeys;
 }
 
