@@ -18,7 +18,8 @@
     "pm2:restart": "pm2 restart cycle-arbitrage",
     "pm2:logs": "pm2 logs cycle-arbitrage",
     "pm2:status": "pm2 status",
-    "pm2:delete": "pm2 delete cycle-arbitrage"
+    "pm2:delete": "pm2 delete cycle-arbitrage",
+    "transfer:bnb": "tsx examples/transferBNB.ts"
   },
   "dependencies": {
     "axios": "^1.13.2",

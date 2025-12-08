@@ -333,7 +333,38 @@ export class TradeExecutor extends EventEmitter {
 
     } catch (error: any) {
       const totalTime = Date.now() - startTime;
-      this.logger.error(`[${cycleId}] ✗ Bundle submission failed after ${totalTime}ms:`, error.message || error);
+
+      // Extract detailed error information
+      let errorDetails: any = {
+        message: error.message || 'Unknown error',
+      };
+
+      // Handle axios errors - extract response data
+      if (error.response) {
+        errorDetails.response = {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: error.response.data,
+        };
+      } else if (error.request) {
+        errorDetails.request = 'Request made but no response received';
+        errorDetails.code = error.code;
+      }
+
+      // Include error code if available
+      if (error.code && !errorDetails.code) {
+        errorDetails.code = error.code;
+      }
+
+      // Include stack trace for debugging
+      if (error.stack) {
+        errorDetails.stack = error.stack;
+      }
+
+      this.logger.error(
+        `[${cycleId}] ✗ Bundle submission failed after ${totalTime}ms:`,
+        JSON.stringify(errorDetails, null, 2)
+      );
       throw error;
     } finally {
       // Release wallet back to pool
