@@ -16,6 +16,7 @@
     "pm2:start:dev": "pm2 start ecosystem.config.cjs --only cycle-arbitrage-dev",
     "pm2:stop": "pm2 stop cycle-arbitrage",
     "pm2:restart": "pm2 restart cycle-arbitrage",
+    "pm2:restart:build": "npm run build && pm2 restart cycle-arbitrage",
     "pm2:logs": "pm2 logs cycle-arbitrage",
     "pm2:status": "pm2 status",
     "pm2:delete": "pm2 delete cycle-arbitrage"
