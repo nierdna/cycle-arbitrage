@@ -2,29 +2,23 @@
  * Example: Cycle Arbitrage MVP
  * 
  * Usage:
- *   Create .env file or export environment variables:
- *   BSC_RPC_URL=https://bsc-dataseed.binance.org/
- *   BSC_WSS_URL=wss://... (optional, for real-time updates)
- *   PRIVATE_KEY=0x... (optional, for execution)
- *   npm start
+ *   1. Create tokens.config.json in project root (see tokens.config.json.example)
+ *   2. Create .env file or export environment variables:
+ *      BSC_RPC_URL=https://bsc-dataseed.binance.org/
+ *      BSC_WSS_URL=wss://... (optional, for real-time updates)
+ *      PRIVATE_KEY=0x... (optional, for execution)
+ *      TOKENS_CONFIG_PATH=./tokens.config.json (optional, override config path)
+ *   3. npm start
  */
 
 import 'dotenv/config';
 import { ethers } from 'ethers';
+import winston from 'winston';
 import { CycleArbitrage } from '../src/cycleArbitrage.js';
-import { Token, TokenRegistry } from '../src/tokens/index.js';
+import { TokenRegistry, loadTokensFromConfig, loadArbitrageConfig, loadWalletKeysFromConfig } from '../src/tokens/index.js';
 import { BundleConfig } from '../src/services/index.js';
+import { WalletPool } from '../src/wallet/index.js';
 import { DEFAULT_RPC_URLS } from 'uniswap-v3-quoter';
-
-// Token addresses on BSC (from execution/web3pro/const.py)
-const TOKENS = {
-  USDT: '0x55d398326f99059fF775485246999027B3197955',
-  WBNB: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
-  ASTER: '0x000Ae314E2A2172a039B26378814C252734f556A',
-  ETH: "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
-  KOGE: "0xe6DF05CE8C8301223373CF5B969AFCb1498c5528",
-  USDC: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
-};
 
 async function main() {
   console.log('=== Cycle Arbitrage MVP ===\n');
@@ -41,62 +35,52 @@ async function main() {
   // Initialize decimal cache (load from file if exists)
   await tokenRegistry.initialize();
 
-  // Add tokens with name and amount config
-  tokenRegistry.addToken(new Token(
-    TOKENS.USDT,
-    'USDT',
-    {
-      minAmountIn: BigInt(1e10), // 0.0001 USDT
-      maxAmountIn: BigInt(1e20), // 10 USDT
-    }
-  ));
-  // tokenRegistry.addToken(new Token(
-  //   TOKENS.USDC,
-  //   'USDC',
-  //   {
-  //     minAmountIn: BigInt(1e10), // 0.0001 USDC
-  //     maxAmountIn: BigInt(1e20), // 10 USDC
-  //   }
-  // ));
-
-  tokenRegistry.addToken(new Token(
-    TOKENS.WBNB,
-    'WBNB',
-    {
-      minAmountIn: BigInt(1e15), // 0.001 WBNB
-      maxAmountIn: BigInt(1e20), // 100 WBNB
-    }
-  ));
+  // Load tokens from config file
+  // Config path can be overridden via TOKENS_CONFIG_PATH env variable
+  // Default: tokens.config.json in project root
+  const configPath = process.env.TOKENS_CONFIG_PATH;
+  if (configPath) {
+    console.log(`Using tokens config: ${configPath}\n`);
+  }
+  try {
+    const tokens = loadTokensFromConfig(configPath);
+    tokenRegistry.addTokens(tokens);
+    console.log(`Loaded ${tokens.length} tokens from config file\n`);
+  } catch (error) {
+    console.error('Failed to load tokens from config file:', error);
+    throw error;
+  }
 
   // Note: All tokens must have amountConfig. Cycles starting from tokens without config will be skipped.
-  // tokenRegistry.addToken(new Token(TOKENS.ASTER, 'ASTER', {
-  //   minAmountIn: BigInt(1e10),
-  //   maxAmountIn: BigInt(1e20),
-  // }));
 
-  // tokenRegistry.addToken(new Token(TOKENS.KOGE, 'KOGE', {
-  //   minAmountIn: BigInt(1e10),
-  //   maxAmountIn: BigInt(1e20),
-  // }));
-
-  // tokenRegistry.addToken(new Token(TOKENS.ETH, 'ETH', {
-  //   minAmountIn: BigInt(1e10),
-  //   maxAmountIn: BigInt(1e20),
-  // }));
+  // Load arbitrage config from file
+  let arbitrageConfigFromFile;
+  try {
+    arbitrageConfigFromFile = loadArbitrageConfig(configPath);
+  } catch (error) {
+    console.warn('Failed to load arbitrage config from file, using defaults:', error);
+  }
 
   // Create arbitrage instance with auto-discovery mode
-  const arbitrage = new CycleArbitrage(provider, tokenRegistry, {
-    minArbitrageBps: 2, // Minimum 2 bps profit
-    scanIntervalMs: 1, // Scan every 1ms
+  // Config from file takes precedence over hardcoded defaults
+  const arbitrageOptions = {
+    minArbitrageBps: arbitrageConfigFromFile?.minArbitrageBps ?? 2, // Minimum 2 bps profit
+    scanIntervalMs: arbitrageConfigFromFile?.scanIntervalMs ?? 1, // Scan every 1ms
     wssUrl: process.env.BSC_WSS_URL, // Optional: for real-time updates
-    amountIn: BigInt(1e18), // 1 USDT (18 decimals) - fallback if optimization disabled
+    amountIn: arbitrageConfigFromFile?.amountIn
+      ? BigInt(arbitrageConfigFromFile.amountIn)
+      : BigInt(1e18), // 1 USDT (18 decimals) - fallback if optimization disabled
     // Enable amountIn optimization using Ternary Search
-    optimizeAmountIn: true,
-    optimizationInterval: 100, // Re-optimize every 100 scans
-    optimizationPrecision: BigInt(1e15), // 0.001 USDT - precision for ternary search
-    dashboardPort: 8080, // Enable HTTP dashboard on port 8080
-    // discoveryFees: [100, 500],
-    discoveryFees: [100, 500, 2500, 10000],
+    optimizeAmountIn: arbitrageConfigFromFile?.optimizeAmountIn ?? true,
+    optimizationInterval: arbitrageConfigFromFile?.optimizationInterval ?? 100, // Re-optimize every 100 scans
+    optimizationPrecision: arbitrageConfigFromFile?.optimizationPrecision
+      ? BigInt(arbitrageConfigFromFile.optimizationPrecision)
+      : BigInt(1e15), // 0.001 USDT - precision for ternary search
+    dashboardPort: arbitrageConfigFromFile?.dashboardPort ?? 8080, // Enable HTTP dashboard on port 8080
+    discoveryFees: arbitrageConfigFromFile?.discoveryFees ?? [100, 500, 2500, 10000],
+    maxHops: arbitrageConfigFromFile?.maxHops,
+    gasPriceUpdateInterval: arbitrageConfigFromFile?.gasPriceUpdateInterval,
+    tokenPriceUpdateInterval: arbitrageConfigFromFile?.tokenPriceUpdateInterval,
     // Telegram notifications (optional)
     telegramConfig: process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID
       ? {
@@ -105,11 +89,58 @@ async function main() {
         enabled: true,
       }
       : undefined,
-  });
+  };
+
+  const arbitrage = new CycleArbitrage(provider, tokenRegistry, arbitrageOptions);
 
   // Optional: Set execution with arbitrage contract (bundle mode only)
-  if (process.env.PRIVATE_KEY) {
-    const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+  // Load wallet keys from config file first, then fallback to env variables
+  let privateKeys: string[] = [];
+
+  try {
+    // Try to load from config file
+    privateKeys = loadWalletKeysFromConfig(configPath);
+    if (privateKeys.length > 0) {
+      console.log(`Loaded ${privateKeys.length} wallet key(s) from config file\n`);
+    }
+  } catch (error) {
+    console.warn('Failed to load wallet keys from config file:', error);
+  }
+
+  // Fallback to env variables if config file doesn't have wallet keys
+  if (privateKeys.length === 0) {
+    privateKeys = [
+      process.env.PRIVATE_KEY,
+      process.env.PRIVATE_KEY_1,
+      process.env.PRIVATE_KEY_2,
+      process.env.PRIVATE_KEY_3,
+    ].filter(Boolean) as string[];
+
+    if (privateKeys.length > 0) {
+      console.log(`Loaded ${privateKeys.length} wallet key(s) from environment variables\n`);
+    }
+  }
+
+  if (privateKeys.length > 0) {
+    // Create wallets from private keys
+    const wallets = privateKeys.map((pk) => new ethers.Wallet(pk, provider));
+
+    // Create WalletPool with nonce caching
+    const walletPool = new WalletPool(
+      wallets,
+      provider,
+      {
+        syncIntervalMs: parseInt(process.env.NONCE_SYNC_INTERVAL_MS || '30000'),
+        logger: winston.createLogger({
+          level: 'info',
+          format: winston.format.simple(),
+          transports: [new winston.transports.Console()],
+        }),
+      },
+      {
+        lockDurationMs: parseInt(process.env.WALLET_LOCK_DURATION_MS || '2000'),
+      }
+    );
 
     // Bundle configuration
     const bundleConfig: BundleConfig = {
@@ -117,6 +148,7 @@ async function main() {
       apiUrl: process.env.BUNDLE_API_URL || 'https://puissant-builder.48.club/',
       maxBlocks: parseInt(process.env.BUNDLE_MAX_BLOCKS || '50'),
       maxSeconds: parseInt(process.env.BUNDLE_MAX_SECONDS || '120'),
+      nonceSyncIntervalMs: parseInt(process.env.NONCE_SYNC_INTERVAL_MS || '30000'),
     };
 
     // Arbitrage contract address (deploy from triangle-arbitrage-contract)
@@ -129,8 +161,9 @@ async function main() {
       );
     }
 
-    arbitrage.setExecution(wallet, bundleConfig, arbitrageContractAddress);
-    console.log(`Wallet: ${wallet.address}`);
+    arbitrage.setExecution(walletPool, bundleConfig, arbitrageContractAddress);
+    console.log(`Wallet Pool: ${walletPool.getPoolSize()} wallet(s)`);
+    console.log(`  Addresses: ${walletPool.getWalletAddresses().join(', ')}`);
     console.log(`Arbitrage Contract: ${arbitrageContractAddress}`);
     console.log('⚠ Bundle execution mode enabled - will submit bundles!\n');
   } else {

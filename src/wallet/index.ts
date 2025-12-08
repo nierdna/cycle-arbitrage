@@ -3,4 +3,5 @@
  */
 
 export * from './nonceCachedWallet.js';
+export * from './walletPool.js';
 

@@ -20,6 +20,7 @@ import { CycleWithState } from '../cycleArbitrage.js';
 import { ARBITRAGE_CONTRACT_ABI } from '../constants.js';
 import { getPoolAddressOrThrow } from '../utils/poolHelper.js';
 import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
+import { WalletPool } from '../wallet/walletPool.js';
 import * as dotenv from 'dotenv';
 
 // Load environment variables
@@ -33,7 +34,7 @@ const shouldSkipTests = !TEST_PRIVATE_KEY || !TEST_CONTRACT_ADDRESS;
 
 describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
   let executor: TradeExecutor;
-  let wallet: NonceCachedWallet;
+  let walletPool: WalletPool;
   let logger: winston.Logger;
   let bundleConfig: BundleConfig;
   let contractConfig: ArbitrageContractConfig;
@@ -57,7 +58,7 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
 
     // Bundle config (same as script)
     bundleConfig = {
-      rpcUrl: 'https://rpc.48.club',
+      rpcUrl: 'https://cosmopolitan-sparkling-arrow.bsc.quiknode.pro/833002b5d68ae8582e9d5bb74ac381a52ec5add5/',
       apiUrl: 'https://puissant-builder.48.club/',
       maxBlocks: 50,
       maxSeconds: 120,
@@ -65,7 +66,13 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
     };
 
     // Create NonceCachedWallet với nonce caching
-    wallet = new NonceCachedWallet(TEST_PRIVATE_KEY!, provider, {
+    const wallet = new NonceCachedWallet(TEST_PRIVATE_KEY!, provider, {
+      syncIntervalMs: bundleConfig.nonceSyncIntervalMs,
+      logger: logger,
+    });
+
+    // Create WalletPool với single wallet
+    walletPool = new WalletPool([wallet], provider, {
       syncIntervalMs: bundleConfig.nonceSyncIntervalMs,
       logger: logger,
     });
@@ -78,7 +85,7 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
 
     // Create executor with real dependencies
     executor = new TradeExecutor(
-      wallet,
+      walletPool,
       logger,
       bundleConfig,
       contractConfig
@@ -120,15 +127,17 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
 
     const amountIn = ethers.parseEther('0.0000001'); // 0.0000001 USDT
     const estimatedOut = ethers.parseEther('0.0000001'); // 0.0000001 USDT (1% profit)
+    const minProfit = estimatedOut > amountIn ? estimatedOut - amountIn : 1n; // Minimum profit required
 
     console.log('\n📊 Test Parameters:');
     console.log('  Cycle ID:', cycle.cycleId);
     console.log('  Amount In:', ethers.formatEther(amountIn), 'USDT');
     console.log('  Estimated Out:', ethers.formatEther(estimatedOut), 'USDT');
     console.log('  Expected Profit:', ethers.formatEther(estimatedOut - amountIn), 'USDT');
+    console.log('  Min Profit:', ethers.formatEther(minProfit), 'USDT');
 
     // Execute cycle (this will make real network calls)
-    await executor.executeCycle(cycle.cycleId, cycle, amountIn, estimatedOut);
+    await executor.executeCycle(cycle.cycleId, cycle, amountIn, estimatedOut, minProfit);
 
     // If we reach here without error, the bundle was submitted successfully
     // Note: We can't verify bundle inclusion immediately, that happens on-chain
@@ -157,15 +166,17 @@ describe.skipIf(shouldSkipTests)('TradeExecutor Integration Tests', () => {
     };
 
     const amountIn = ethers.parseEther('0.0001');
-    const estimatedOut = ethers.parseEther('0.0001'); 
+    const estimatedOut = ethers.parseEther('0.0001');
+    const minProfit = estimatedOut > amountIn ? estimatedOut - amountIn : 1n; // Minimum profit required
 
     console.log('\n📊 Test Parameters:');
     console.log('  Cycle ID:', cycle.cycleId);
     console.log('  Amount In:', ethers.formatEther(amountIn), 'USDT');
     console.log('  Estimated Out:', ethers.formatEther(estimatedOut), 'USDT');
     console.log('  Expected Profit:', ethers.formatEther(estimatedOut - amountIn), 'USDT');
+    console.log('  Min Profit:', ethers.formatEther(minProfit), 'USDT');
 
-    await executor.executeCycle(cycle.cycleId, cycle, amountIn, estimatedOut);
+    await executor.executeCycle(cycle.cycleId, cycle, amountIn, estimatedOut, minProfit);
 
     console.log('\n✅ Bundle submitted successfully!');
   }, 60000);

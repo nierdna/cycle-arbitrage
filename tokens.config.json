@@ -1,0 +1,62 @@
+{
+  "tokens": [
+    {
+      "address": "0x55d398326f99059fF775485246999027B3197955",
+      "name": "USDT",
+      "amountConfig": {
+        "minAmountIn": "10000000000",
+        "maxAmountIn": "10000000000000000000000"
+      }
+    },
+    {
+      "address": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+      "name": "USDC",
+      "amountConfig": {
+        "minAmountIn": "10000000000",
+        "maxAmountIn": "10000000000000000000000"
+      }
+    },
+    {
+      "address": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+      "name": "WBNB",
+      "amountConfig": {
+        "minAmountIn": "1000000000000000",
+        "maxAmountIn": "100000000000000000000000"
+      }
+    },
+    {
+      "address": "0x2170Ed0880ac9A755fd29B2688956BD959F933F8",
+      "name": "ETH",
+      "amountConfig": {
+        "minAmountIn": "10000000000",
+        "maxAmountIn": "10000000000000000000000"
+      }
+    },
+    {
+      "address": "0xe6DF05CE8C8301223373CF5B969AFCb1498c5528",
+      "name": "KOGE",
+      "amountConfig": {
+        "minAmountIn": "10000000000",
+        "maxAmountIn": "10000000000000000000000"
+      }
+    },
+    {
+      "address": "0x000Ae314E2A2172a039B26378814C252734f556A",
+      "name": "ASTER",
+      "amountConfig": {
+        "minAmountIn": "10000000000",
+        "maxAmountIn": "10000000000000000000000"
+      }
+    }
+  ],
+  "arbitrage": {
+    "discoveryFees": [100, 500, 2500, 10000],
+    "walletKeys": [
+      ".keys/0x44C0fB0aB3ab89dF19ddE132F5AF869A52E8FA22.txt",
+      ".keys/0xD2E06a9AaE92dCFdbA8A2AECa1bC603e4Fd9cc50.txt",
+      ".keys/0x9b52d35B2EB9F46Ca8337B1eD0aFb3089C3B1D93.txt",
+      ".keys/0x96b95D4f136e884154758df2205bfd896829622c.txt"
+    ]
+  }
+}
+

@@ -22,7 +22,11 @@ import {
   TradeExecutor,
   BundleConfig,
   ArbitrageContractConfig,
+  GasPriceService,
+  TokenPriceService,
+  MinProfitCalculator,
 } from './services/index.js';
+import { WalletPool } from './wallet/walletPool.js';
 import { CycleEstimator } from './estimation/cycleEstimator.js';
 import { TelegramNotifier, TelegramConfig } from './notifications/index.js';
 
@@ -47,7 +51,7 @@ export interface CycleWithState extends CycleConfig {
 }
 
 export interface ArbitrageOptions {
-  minArbitrageBps?: number;
+  minArbitrageBps?: number; // Deprecated: kept for backward compatibility, not used anymore
   scanIntervalMs?: number;
   wssUrl?: string;
   amountIn?: bigint; // Default amount to test with
@@ -60,6 +64,8 @@ export interface ArbitrageOptions {
   maxHops?: number; // Maximum hops for cycle discovery (default: 3)
   discoveryFees?: number[]; // Fees to try during discovery (default: [100, 500, 2500, 10000])
   telegramConfig?: TelegramConfig; // Telegram notification configuration (optional)
+  gasPriceUpdateInterval?: number; // Gas price update interval in ms (default: 5000)
+  tokenPriceUpdateInterval?: number; // Token price update interval in ms (default: 30000)
 }
 
 /**
@@ -85,6 +91,11 @@ export class CycleArbitrage {
 
   // Notifications
   private telegramNotifier?: TelegramNotifier;
+
+  // Background services for minProfit calculation
+  private gasPriceService?: GasPriceService;
+  private tokenPriceService?: TokenPriceService;
+  private minProfitCalculator?: MinProfitCalculator;
 
   private cycles: Map<string, CycleWithState> = new Map();
   private scanners: Map<string, CycleScanner> = new Map(); // Track active scanners for cleanup
@@ -120,6 +131,8 @@ export class CycleArbitrage {
       historyDir: options.historyDir ?? 'data/history',
       maxHops: options.maxHops ?? 3,
       discoveryFees: options.discoveryFees ?? [100, 500, 2500, 10000],
+      gasPriceUpdateInterval: options.gasPriceUpdateInterval ?? 5000, // 5 seconds
+      tokenPriceUpdateInterval: options.tokenPriceUpdateInterval ?? 30000, // 30 seconds
     };
 
     // Initialize logger
@@ -181,6 +194,27 @@ export class CycleArbitrage {
         (cycleId: string, amountIn: bigint) => this.cycleEstimator.calculateArbitrageBps(cycleId, amountIn)
       );
     }
+
+    // Initialize background services for minProfit calculation
+    this.gasPriceService = new GasPriceService(
+      provider,
+      this.options.gasPriceUpdateInterval,
+      this.logger
+    );
+
+    this.tokenPriceService = new TokenPriceService(
+      provider,
+      this.tokenRegistry.getDecimalCache(),
+      this.options.tokenPriceUpdateInterval,
+      this.logger
+    );
+
+    this.minProfitCalculator = new MinProfitCalculator(
+      this.gasPriceService,
+      this.tokenPriceService,
+      this.tokenRegistry.getDecimalCache(),
+      this.logger
+    );
   }
 
   /**
@@ -213,10 +247,14 @@ export class CycleArbitrage {
 
 
   /**
-   * Set wallet and arbitrage contract for execution (bundle mode only)
+   * Set wallet pool and arbitrage contract for execution (bundle mode only)
+   * 
+   * @param walletPool WalletPool instance for wallet rotation
+   * @param bundleConfig Bundle configuration
+   * @param contractAddress Arbitrage contract address
    */
   setExecution(
-    wallet: ethers.Wallet,
+    walletPool: WalletPool,
     bundleConfig: BundleConfig,
     contractAddress: string
   ): void {
@@ -226,10 +264,11 @@ export class CycleArbitrage {
     };
 
     this.tradeExecutor = new TradeExecutor(
-      wallet,
+      walletPool,
       this.logger,
       bundleConfig,
-      contractConfig
+      contractConfig,
+      this.gasPriceService
     );
 
     // Subscribe to TradeExecutor events
@@ -282,6 +321,26 @@ export class CycleArbitrage {
 
     this.logger.info(`Total cycles: ${this.cycles.size}`);
 
+    // Start background services for minProfit calculation
+    if (this.gasPriceService) {
+      await this.gasPriceService.start();
+    }
+
+    if (this.tokenPriceService) {
+      // Register all token addresses from cycles
+      const allTokenAddresses = new Set<string>();
+      for (const cycle of this.cycles.values()) {
+        for (const address of cycle.addresses) {
+          allTokenAddresses.add(address);
+        }
+      }
+      // Also add WBNB address (needed for gas price calculation)
+      allTokenAddresses.add('0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c');
+
+      this.tokenPriceService.registerTokens(Array.from(allTokenAddresses));
+      await this.tokenPriceService.start();
+    }
+
     // Resolve pool addresses for all cycles using PoolAddressResolver
     this.poolAddressResolver.resolveAllPoolAddresses(this.cycles);
 
@@ -327,18 +386,23 @@ export class CycleArbitrage {
       return;
     }
 
+    if (!this.minProfitCalculator) {
+      throw new Error('MinProfitCalculator not initialized. Make sure initialize() was called.');
+    }
+
     const scanner = new CycleScanner(
       cycleId,
       cycle,
       (cid: string, amountIn: bigint) => this.estimateAmountOutForCycle(cid, amountIn),
       {
-        minArbitrageBps: this.options.minArbitrageBps,
+        minArbitrageBps: this.options.minArbitrageBps, // Deprecated, kept for backward compatibility
         scanIntervalMs: this.options.scanIntervalMs,
         amountIn: this.options.amountIn,
         optimizeAmountIn: this.options.optimizeAmountIn,
         optimizationInterval: this.options.optimizationInterval,
         optimizationPrecision: this.options.optimizationPrecision,
       },
+      this.minProfitCalculator,
       this.amountOptimizer,
       this.logger,
       this.formatter
@@ -409,7 +473,8 @@ export class CycleArbitrage {
             data.cycleId,
             cycle,
             executeAmount,
-            executeAmountOut
+            executeAmountOut,
+            data.minProfit // Pass minProfit from scanner
           );
         } catch (error: any) {
           this.logger.error(
@@ -443,7 +508,7 @@ export class CycleArbitrage {
 
     this.isRunning = true;
     this.logger.info('Starting arbitrage scan...');
-    this.logger.info(`  Min arbitrage: ${this.options.minArbitrageBps} bps`);
+    this.logger.info(`  Min profit: calculated dynamically based on gas costs`);
     this.logger.info(`  Scan interval: ${this.options.scanIntervalMs}ms`);
     this.logger.info(`  Test amount: ${ethers.formatEther(this.options.amountIn)} tokens`);
     this.logger.info(`  Cycles: ${this.cycles.size}`);
@@ -524,6 +589,25 @@ export class CycleArbitrage {
         this.logger.info('Metrics collector stopped (data flushed)');
       } catch (error: any) {
         this.logger.warn('Error stopping metrics:', error?.message || String(error));
+      }
+
+      // Stop background services
+      if (this.gasPriceService) {
+        try {
+          this.gasPriceService.stop();
+          this.logger.info('GasPriceService stopped');
+        } catch (error: any) {
+          this.logger.warn('Error stopping GasPriceService:', error?.message || String(error));
+        }
+      }
+
+      if (this.tokenPriceService) {
+        try {
+          this.tokenPriceService.stop();
+          this.logger.info('TokenPriceService stopped');
+        } catch (error: any) {
+          this.logger.warn('Error stopping TokenPriceService:', error?.message || String(error));
+        }
       }
 
       this.logger.info('✓ Cycle Arbitrage stopped successfully');

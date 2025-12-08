@@ -4,7 +4,7 @@
  */
 
 import { ethers } from 'ethers';
-import { USDT_ADDRESS, ERC20_ABI, MIN_POOL_LIQUIDITY_USD } from '../constants.js';
+import { USDT_ADDRESS, ERC20_ABI, POOL_ABI, MIN_POOL_LIQUIDITY_USD } from '../constants.js';
 import { computePoolAddress, sortTokens } from './poolHelper.js';
 import { DecimalCache } from '../tokens/decimalCache.js';
 import { RateLimiter } from './rateLimiter.js';
@@ -57,7 +57,7 @@ async function findUSDTPricePool(
 }
 
 /**
- * Get token price in USDT from pool balances
+ * Get token price in USDT from pool sqrtPriceX96 (Uniswap V3)
  * Uses cached price if available
  * 
  * @param provider - Ethers provider
@@ -96,35 +96,72 @@ export async function getTokenPriceInUSDT(
     
     // Determine which is USDT and which is the token
     const usdtLower = USDT_ADDRESS.toLowerCase();
-    const usdtAddress = t0.toLowerCase() === usdtLower ? t0 : t1;
-    const otherTokenAddress = t0.toLowerCase() === usdtLower ? t1 : t0;
+    const tokenLower = tokenAddress.toLowerCase();
+    const token0Address = t0.toLowerCase();
+    const token1Address = t1.toLowerCase();
 
-    // Get balances (with rate limiting)
-    const usdtContract = new ethers.Contract(usdtAddress, ERC20_ABI, provider);
-    const tokenContract = new ethers.Contract(otherTokenAddress, ERC20_ABI, provider);
-    
-    const [usdtBalance, tokenBalance] = await Promise.all([
-      rateLimiter.execute(() => usdtContract.balanceOf(poolAddress)),
-      rateLimiter.execute(() => tokenContract.balanceOf(poolAddress)),
-    ]);
+    const isUSDTToken0 = token0Address === usdtLower;
+    const isUSDTToken1 = token1Address === usdtLower;
 
-    // Get decimals
-    const [usdtDecimals, tokenDecimals] = await Promise.all([
-      decimalCache.getDecimals(usdtAddress),
-      decimalCache.getDecimals(otherTokenAddress),
-    ]);
-
-    // Normalize balances
-    const usdtAmount = Number(ethers.formatUnits(usdtBalance, usdtDecimals));
-    const tokenAmount = Number(ethers.formatUnits(tokenBalance, tokenDecimals));
-
-    if (tokenAmount === 0) {
+    if (!isUSDTToken0 && !isUSDTToken1) {
+      console.warn(`Pool ${poolAddress} does not contain USDT`);
       return null;
     }
 
-    // Calculate price: price = USDT balance / Token balance
-    // This gives price in USDT per token
-    const price = usdtAmount / tokenAmount;
+    // Create pool contract to get slot0 (contains sqrtPriceX96)
+    const poolContract = new ethers.Contract(poolAddress, POOL_ABI, provider);
+
+    // Get slot0 (contains sqrtPriceX96) - only on-chain call needed
+    const slot0 = await rateLimiter.execute(() => poolContract.slot0());
+    const sqrtPriceX96 = slot0.sqrtPriceX96;
+
+    // Get decimals for both tokens
+    const [decimals0, decimals1] = await Promise.all([
+      decimalCache.getDecimals(t0),
+      decimalCache.getDecimals(t1),
+    ]);
+
+    // Calculate price from sqrtPriceX96
+    // In Uniswap V3: sqrtPriceX96 = sqrt(reserve1 / reserve0) * 2^96
+    // where reserve0 and reserve1 are raw token amounts (with decimals)
+    //
+    // So: (sqrtPriceX96 / 2^96)^2 = reserve1 / reserve0
+    //
+    // To get price in USDT per token (human-readable):
+    // price = (USDT_amount / 10^usdtDecimals) / (TOKEN_amount / 10^tokenDecimals)
+    //       = (USDT_amount / TOKEN_amount) * (10^tokenDecimals / 10^usdtDecimals)
+    //
+    // - If token0 = USDT, token1 = TOKEN:
+    //   reserve1/reserve0 = TOKEN_reserve/USDT_reserve
+    //   price = (USDT_reserve/TOKEN_reserve) * (10^decimals1 / 10^decimals0)
+    //         = (1 / reserveRatio) * (10^decimals1 / 10^decimals0)
+    // - If token0 = TOKEN, token1 = USDT:
+    //   reserve1/reserve0 = USDT_reserve/TOKEN_reserve
+    //   price = (USDT_reserve/TOKEN_reserve) * (10^decimals1 / 10^decimals0)
+    //         = reserveRatio * (10^decimals1 / 10^decimals0)
+
+    const Q96 = BigInt(2) ** BigInt(96);
+    const sqrtPriceX96BigInt = BigInt(sqrtPriceX96.toString());
+
+    // Calculate sqrtPrice = sqrtPriceX96 / 2^96
+    const sqrtPrice = Number(sqrtPriceX96BigInt) / Number(Q96);
+
+    // Calculate reserve1/reserve0 = (sqrtPrice)^2
+    const reserveRatio = sqrtPrice * sqrtPrice;
+
+    // Calculate final price in USDT per token (human-readable)
+    let price: number;
+    if (isUSDTToken0) {
+      // token0 = USDT, token1 = TOKEN
+      // reserveRatio = reserve1/reserve0 = TOKEN_reserve/USDT_reserve
+      // price = (USDT_reserve/TOKEN_reserve) * (10^decimals1 / 10^decimals0)
+      price = (1 / reserveRatio) * (10 ** decimals1) / (10 ** decimals0);
+    } else {
+      // token0 = TOKEN, token1 = USDT
+      // reserveRatio = reserve1/reserve0 = USDT_reserve/TOKEN_reserve
+      // price = (USDT_reserve/TOKEN_reserve) * (10^decimals1 / 10^decimals0)
+      price = reserveRatio * (10 ** decimals1) / (10 ** decimals0);
+    }
 
     // Cache the price
     priceCache.set(tokenLower, {
@@ -212,5 +249,53 @@ export async function checkPoolLiquidity(
     console.warn(`Failed to check liquidity for pool ${poolAddress}: ${error.message}`);
     return { hasEnoughLiquidity: true };
   }
+}
+
+// Test function - run if file is executed directly
+async function testGetTokenPriceInUSDT() {
+  console.log('=== Testing getTokenPriceInUSDT ===\n');
+
+  // Setup provider
+  const rpcUrl = process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org/';
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  console.log(`RPC: ${rpcUrl}\n`);
+
+  // Initialize decimal cache (load from file if exists)
+  const decimalCache = new DecimalCache(provider);
+  await decimalCache.load();
+
+  // Test tokens (BSC Mainnet)
+  const testTokens = [
+    { address: '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c', name: 'WBNB' },
+    { address: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8', name: 'ETH' },
+    { address: '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d', name: 'USDC' },
+    { address: '0x55d398326f99059fF775485246999027B3197955', name: 'USDT' }, // Should return 1.0
+  ];
+
+  for (const token of testTokens) {
+    try {
+      console.log(`Testing ${token.name} (${token.address})...`);
+      const price = await getTokenPriceInUSDT(provider, token.address, decimalCache);
+
+      if (price !== null) {
+        console.log(`  ✅ Price: $${price.toFixed(6)}`);
+      } else {
+        console.log(`  ❌ Failed to get price`);
+      }
+    } catch (error: any) {
+      console.error(`  ❌ Error: ${error.message}`);
+    }
+    console.log('');
+  }
+
+  console.log('=== Test completed ===');
+}
+
+// Run test if file is executed directly
+if (
+  import.meta.url === `file://${process.argv[1]}` ||
+  process.argv[1]?.includes('poolLiquidityHelper')
+) {
+  testGetTokenPriceInUSDT().catch(console.error);
 }
 

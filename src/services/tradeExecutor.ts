@@ -20,6 +20,8 @@ import { EventEmitter } from 'events';
 import { CycleWithState } from '../cycleArbitrage.js';
 import { MIN_SQRT_RATIO, MAX_SQRT_RATIO } from '../constants.js';
 import { NonceCachedWallet } from '../wallet/nonceCachedWallet.js';
+import { WalletPool } from '../wallet/walletPool.js';
+import { GasPriceService } from './gasPriceService.js';
 
 export interface BundleConfig {
   rpcUrl: string;
@@ -35,39 +37,27 @@ export interface ArbitrageContractConfig {
 }
 
 export class TradeExecutor extends EventEmitter {
-  private arbitrageContract: ethers.Contract;
   private contractAddress: string;
+  private contractABI: any[];
   private executingCycles: Map<string, number> = new Map(); // Track cycles với timestamp: cycleId -> timestamp
-  private wallet: NonceCachedWallet; // Use NonceCachedWallet instead of ethers.Wallet
+  private walletPool: WalletPool; // Wallet pool for rotation
   private readonly LOCK_DURATION_MS = 1000; // Lock duration: 1 second
 
   constructor(
-    wallet: ethers.Wallet | NonceCachedWallet,
+    walletPool: WalletPool,
     private logger: winston.Logger,
     private bundleConfig: BundleConfig,
-    contractConfig: ArbitrageContractConfig
+    contractConfig: ArbitrageContractConfig,
+    private gasPriceService?: GasPriceService
   ) {
     super(); // Call EventEmitter constructor
-    // Save contract address
+    // Save contract config
     this.contractAddress = contractConfig.contractAddress;
+    this.contractABI = contractConfig.contractABI;
+    this.walletPool = walletPool;
 
-    // Convert to NonceCachedWallet nếu chưa phải
-    if (wallet instanceof NonceCachedWallet) {
-      this.wallet = wallet;
-    } else {
-      // Create NonceCachedWallet từ ethers.Wallet
-      const provider = wallet.provider || new ethers.JsonRpcProvider(this.bundleConfig.rpcUrl);
-      this.wallet = new NonceCachedWallet(wallet.privateKey, provider, {
-        syncIntervalMs: this.bundleConfig.nonceSyncIntervalMs,
-        logger: this.logger,
-      });
-    }
-
-    // Create contract instance
-    this.arbitrageContract = new ethers.Contract(
-      contractConfig.contractAddress,
-      contractConfig.contractABI,
-      this.wallet
+    this.logger.info(
+      `[TradeExecutor] Initialized with wallet pool (${walletPool.getPoolSize()} wallets)`
     );
   }
 
@@ -77,13 +67,15 @@ export class TradeExecutor extends EventEmitter {
    * 
    * IMPORTANT: Reverse pools and fees order for flash loan logic
    * 
+   * @param minProfit Optional minProfit calculated by scanner. If provided, will be used instead of calculating.
    * @returns Transaction hash of the first transaction in the bundle, or undefined if not available
    */
   async executeCycle(
     cycleId: string,
     cycle: CycleWithState,
     amountIn: bigint,
-    estimatedOut: bigint
+    estimatedOut: bigint,
+    minProfit?: bigint
   ): Promise<string | undefined> {
     const startTime = Date.now();
     const now = Date.now();
@@ -107,6 +99,20 @@ export class TradeExecutor extends EventEmitter {
 
     // Set lock with timestamp
     this.executingCycles.set(cycleId, now);
+
+    // Acquire wallet from pool
+    const walletLock = this.walletPool.acquireWallet();
+    if (!walletLock) {
+      this.logger.warn(
+        `[${cycleId}] All wallets are locked. Skipping execution. (Locked: ${this.walletPool.getLockedCount()}/${this.walletPool.getPoolSize()})`
+      );
+      return undefined;
+    }
+
+    const wallet = walletLock.wallet;
+    const walletAddress = wallet.address;
+
+    this.logger.debug(`[${cycleId}] Using wallet: ${walletAddress}`);
 
     try {
       const poolCount = cycle.poolAddresses.length;
@@ -137,17 +143,49 @@ export class TradeExecutor extends EventEmitter {
       // Contract expects exact output amount from Pool1 (ví dụ: 101 USDT)
       const exactOutputAmount = estimatedOut;
 
-      // Calculate min profit (optional, set to 0 to disable check)
-      const minProfit = 1n;
+      // Get gas prices for transaction
+      // Use GasPriceService if available, otherwise fallback to provider
+      let maxPriorityFeePerGas: bigint;
+      if (this.gasPriceService) {
+        maxPriorityFeePerGas = this.gasPriceService.getGasPrice();
+        this.logger.debug(
+          `[${cycleId}] Using gas price from GasPriceService: ${ethers.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`
+        );
+      } else {
+        // Fallback: get from provider
+        const feeData = await wallet.provider?.getFeeData();
+        maxPriorityFeePerGas = feeData?.gasPrice || ethers.parseUnits("0.05", "gwei");
+        this.logger.debug(
+          `[${cycleId}] Using gas price from provider (fallback): ${ethers.formatUnits(maxPriorityFeePerGas, 'gwei')} gwei`
+        );
+      }
+      const maxFeePerGas = ethers.parseUnits("3", "gwei");
+
+      // minProfit must be provided from scanner
+      if (minProfit === undefined) {
+        throw new Error(`[${cycleId}] minProfit is required but not provided`);
+      }
+
+      const calculatedMinProfit = minProfit;
+      this.logger.debug(
+        `[${cycleId}] Using minProfit from scanner: ${ethers.formatEther(calculatedMinProfit)} tokens`
+      );
 
       // Tip amount (optional)
       const tipAmount = ethers.parseEther('0.00001');
 
       // Get nonce từ cache
-      const nonce = await this.wallet.getCachedNonce();
+      const nonce = await wallet.getCachedNonce();
+
+      // Create contract instance với wallet từ pool
+      const arbitrageContract = new ethers.Contract(
+        this.contractAddress,
+        this.contractABI,
+        wallet
+      );
 
       // Encode function call based on pool count
-      const iface = this.arbitrageContract.interface;
+      const iface = arbitrageContract.interface;
       let data: string;
 
       if (poolCount === 2) {
@@ -161,7 +199,7 @@ export class TradeExecutor extends EventEmitter {
           exactOutputAmount,  // Exact output amount from Pool1 (uint256, số dương)
           sqrtPriceLimits[0],
           sqrtPriceLimits[1],
-          minProfit,
+          calculatedMinProfit,
           tipAmount,
         ]);
       } else {
@@ -178,14 +216,10 @@ export class TradeExecutor extends EventEmitter {
           sqrtPriceLimits[0],
           sqrtPriceLimits[1],
           sqrtPriceLimits[2],
-          minProfit,
+          calculatedMinProfit,
           tipAmount,
         ]);
       }
-
-      // Get gas price
-      const maxPriorityFeePerGas = ethers.parseUnits("2", "gwei");
-      const maxFeePerGas = ethers.parseUnits("3", "gwei");
 
       // Estimate gas limit based on pool count
       const gasLimit = poolCount === 2 ? 500000n : 1000000n;
@@ -203,10 +237,10 @@ export class TradeExecutor extends EventEmitter {
         chainId: 56, // BSC Mainnet
       };
 
-      this.logger.info(`[${cycleId}] Signing transaction...`);
+      this.logger.info(`[${cycleId}] Signing transaction with wallet ${walletAddress}...`);
 
       // Sign transaction
-      const signedTx = await this.wallet.signTransaction(tx);
+      const signedTx = await wallet.signTransaction(tx);
 
       // Create bundle
       const bundle: any = {
@@ -219,7 +253,7 @@ export class TradeExecutor extends EventEmitter {
 
       // Sign bundle with 48spSign
       this.logger.info(`[${cycleId}] Signing bundle with 48spSign...`);
-      const bundleSign = this.signBundle48sp([signedTx]);
+      const bundleSign = this.signBundle48sp([signedTx], wallet);
       bundle['48spSign'] = bundleSign;
 
       // Submit bundle
@@ -244,18 +278,18 @@ export class TradeExecutor extends EventEmitter {
 
         // Check nếu error là nonce mismatch
         if (errorMsg.includes('nonce') || errorMsg.includes('replacement') || errorMsg.includes('already known')) {
-          this.logger.warn(`[${cycleId}] Nonce error detected, syncing nonce...`);
-          await this.wallet.syncNonce();
+          this.logger.warn(`[${cycleId}] Nonce error detected, syncing nonce for wallet ${walletAddress}...`);
+          await wallet.syncNonce();
           // Không retry tự động, để caller quyết định
         }
 
         throw new Error(`Bundle submission failed: ${errorMsg}`);
       }
 
-      this.logger.info(`[${cycleId}] ✓ Bundle submitted successfully`);
+      this.logger.info(`[${cycleId}] ✓ Bundle submitted successfully with wallet ${walletAddress}`);
 
       // Increment nonce sau khi submit thành công
-      this.wallet.incrementNonce();
+      wallet.incrementNonce();
 
       let txHash: string | undefined;
 
@@ -269,7 +303,12 @@ export class TradeExecutor extends EventEmitter {
             this.logger.info(`[${cycleId}] Transaction hash: ${txHash}`);
           }
         } catch (error: any) {
-          this.logger.warn(`[${cycleId}] Failed to fetch tx hash from bundle: ${error.message || error}`);
+          const errorMessage = error.message || error;
+          if (errorMessage.includes('Bundle không được confirm')) {
+            this.logger.warn(`[${cycleId}] Bundle không được confirm: ${res.data.result}`);
+          } else {
+            this.logger.warn(`[${cycleId}] Failed to fetch tx hash from bundle: ${errorMessage}`);
+          }
         }
       }
 
@@ -299,9 +338,44 @@ export class TradeExecutor extends EventEmitter {
 
     } catch (error: any) {
       const totalTime = Date.now() - startTime;
-      this.logger.error(`[${cycleId}] ✗ Bundle submission failed after ${totalTime}ms:`, error.message || error);
+
+      // Extract detailed error information
+      let errorDetails: any = {
+        message: error.message || 'Unknown error',
+      };
+
+      // Handle axios errors - extract response data
+      if (error.response) {
+        errorDetails.response = {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: error.response.data,
+        };
+      } else if (error.request) {
+        errorDetails.request = 'Request made but no response received';
+        errorDetails.code = error.code;
+      }
+
+      // Include error code if available
+      if (error.code && !errorDetails.code) {
+        errorDetails.code = error.code;
+      }
+
+      // Include stack trace for debugging
+      if (error.stack) {
+        errorDetails.stack = error.stack;
+      }
+
+      this.logger.error(
+        `[${cycleId}] ✗ Bundle submission failed after ${totalTime}ms:`,
+        JSON.stringify(errorDetails, null, 2)
+      );
       throw error;
     } finally {
+      // Release wallet back to pool
+      if (walletLock) {
+        this.walletPool.releaseWallet(walletAddress);
+      }
       // Keep timestamp in map for lock duration
       // Cleanup will handle removal after lock duration expires
       // This ensures cycle is locked for 1s even after completion/error
@@ -313,6 +387,7 @@ export class TradeExecutor extends EventEmitter {
    * 
    * @param bundleHash Bundle hash from bundle submission result
    * @returns First transaction hash from the bundle, or undefined if not available
+   * @throws Error if bundle is not submitted or not confirmed
    */
   private async getTxHashFromBundle(bundleHash: string): Promise<string | undefined> {
     try {
@@ -322,6 +397,11 @@ export class TradeExecutor extends EventEmitter {
           timeout: 10000,
         }
       );
+
+      // Check if bundle is submitted and confirmed
+      if (response.data?.submitted === false || response.data?.confirmed === false) {
+        throw new Error('Bundle không được confirm');
+      }
 
       if (response.data?.txs && Array.isArray(response.data.txs) && response.data.txs.length > 0) {
         return response.data.txs[0].tx_hash;
@@ -410,9 +490,10 @@ export class TradeExecutor extends EventEmitter {
    * 5. Format signature: r (32 bytes) + s (32 bytes) + v (1 byte, recovery id 0 or 1)
    * 
    * @param rawTxs Array of raw signed transactions (RLP-encoded hex strings)
+   * @param wallet Wallet to use for signing
    * @returns Hex string signature (0x...)
    */
-  private signBundle48sp(rawTxs: string[]): string {
+  private signBundle48sp(rawTxs: string[], wallet: NonceCachedWallet): string {
     // 1. Hash từng tx và concat
     let concatenatedHashes = new Uint8Array(0);
 
@@ -436,7 +517,7 @@ export class TradeExecutor extends EventEmitter {
     const finalHashBytes = ethers.getBytes(finalHash);
 
     // 3. Sign với private key (sign bytes trực tiếp)
-    const signature = this.wallet.signingKey.sign(finalHashBytes);
+    const signature = wallet.signingKey.sign(finalHashBytes);
 
     // 4. Format signature: r (32 bytes) + s (32 bytes) + v (1 byte)
     // QUAN TRỌNG: recovery id phải là 0 hoặc 1, không phải 27 hoặc 28
