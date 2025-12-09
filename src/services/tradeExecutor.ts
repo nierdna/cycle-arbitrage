@@ -172,7 +172,7 @@ export class TradeExecutor extends EventEmitter {
       );
 
       // Tip amount (optional)
-      const tipAmount = ethers.parseEther('0.00001');
+      const tipAmount = ethers.parseEther('0.0001');
 
       // Get nonce từ cache
       const nonce = await wallet.getCachedNonce();
