@@ -309,6 +309,20 @@ export class MetricsCollector {
 
     this.metrics.lastUpdate = Date.now();
     
+    // Persist to database (async, don't wait)
+    this.historyPersistence.updateCycleStatistics(cycleId, 'opportunity', representativeTimestamp)
+      .catch(err => {
+        console.warn(`Warning: Failed to update cycle statistics for ${cycleId}:`, err.message);
+      });
+    
+    // Save individual event to database (async, don't wait)
+    this.historyPersistence.saveCycleEvent(cycleId, 'opportunity', representativeTimestamp, {
+      arbitrageBps: bestArbitrage, // Store best arbitrage for this opportunity
+      amountIn: bestAmountIn,
+    }).catch(err => {
+      console.warn(`Warning: Failed to save cycle event for ${cycleId}:`, err.message);
+    });
+    
     // Record aggregated historical data point (one per second)
     this.addHistoricalDataPoint({
       timestamp: representativeTimestamp,
@@ -356,17 +370,34 @@ export class MetricsCollector {
     amountIn?: bigint,
     arbitrageBps?: number
   ): void {
+    const now = Date.now();
     this.metrics.totalExecutions++;
     this.metrics.totalProfit += profit;
     const cycle = this.getOrCreateCycle(cycleId);
     cycle.executions++;
     cycle.totalProfit += profit;
-    cycle.lastExecution = Date.now();
-    this.metrics.lastUpdate = Date.now();
+    cycle.lastExecution = now;
+    this.metrics.lastUpdate = now;
+
+    // Persist to database (async, don't wait)
+    this.historyPersistence.updateCycleStatistics(cycleId, 'execution', now)
+      .catch(err => {
+        console.warn(`Warning: Failed to update cycle statistics for ${cycleId}:`, err.message);
+      });
+    
+    // Save individual event to database (async, don't wait)
+    this.historyPersistence.saveCycleEvent(cycleId, 'execution', now, {
+      profit,
+      txHash,
+      amountIn,
+      arbitrageBps,
+    }).catch(err => {
+      console.warn(`Warning: Failed to save cycle event for ${cycleId}:`, err.message);
+    });
 
     // Save execution data point to file for historical tracking
     this.addHistoricalDataPoint({
-      timestamp: Date.now(),
+      timestamp: now,
       cycleId,
       arbitrageBps: null, // Execution doesn't have arbitrageBps in the same way as opportunities
       bestAmountInArbBps: null,
@@ -539,6 +570,33 @@ export class MetricsCollector {
       });
     }
     return this.metrics.cycles.get(cycleId)!;
+  }
+
+  /**
+   * Get cycle statistics from database (persisted data)
+   */
+  async getCycleStatisticsFromDB(cycleId: string) {
+    return await this.historyPersistence.getCycleStatistics(cycleId);
+  }
+
+  /**
+   * Get all cycle statistics from database
+   */
+  async getAllCycleStatisticsFromDB() {
+    return await this.historyPersistence.getAllCycleStatistics();
+  }
+
+  /**
+   * Get cycle events from database
+   */
+  async getCycleEventsFromDB(
+    cycleId: string,
+    eventType?: 'opportunity' | 'execution',
+    startTime?: number,
+    endTime?: number,
+    limit?: number
+  ) {
+    return await this.historyPersistence.getCycleEvents(cycleId, eventType, startTime, endTime, limit);
   }
 }
 

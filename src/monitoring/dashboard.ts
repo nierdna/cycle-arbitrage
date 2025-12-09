@@ -72,6 +72,81 @@ export class DashboardServer {
       });
     });
 
+    // Cycle statistics from database (persisted data)
+    this.app.get('/api/cycles/:cycleId/statistics', async (req: Request, res: Response) => {
+      try {
+        const statistics = await this.metrics.getCycleStatisticsFromDB(req.params.cycleId);
+        if (!statistics) {
+          res.status(404).json({ error: 'Cycle statistics not found' });
+          return;
+        }
+        res.json(statistics);
+      } catch (err: any) {
+        console.error('Error loading cycle statistics:', err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // All cycle statistics from database
+    this.app.get('/api/statistics', async (_req: Request, res: Response) => {
+      try {
+        const statistics = await this.metrics.getAllCycleStatisticsFromDB();
+        res.json({
+          cycles: statistics,
+          count: statistics.length,
+        });
+      } catch (err: any) {
+        console.error('Error loading all cycle statistics:', err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // Cycle events from database
+    this.app.get('/api/cycles/:cycleId/events', async (req: Request, res: Response) => {
+      try {
+        const cycleId = req.params.cycleId;
+        const eventType = req.query.eventType as 'opportunity' | 'execution' | undefined;
+        const limit = req.query.limit ? parseInt(req.query.limit as string) : undefined;
+        
+        // Parse time range
+        const hours = parseInt(req.query.hours as string) || 0;
+        const minutes = parseInt(req.query.minutes as string) || 0;
+        const days = parseInt(req.query.days as string) || 0;
+        
+        let startTime: number | undefined;
+        let endTime: number | undefined;
+        
+        if (days > 0 || hours > 0 || minutes > 0) {
+          endTime = Date.now();
+          startTime = endTime - (
+            (days * 24 * 60 * 60 * 1000) +
+            (hours * 60 * 60 * 1000) +
+            (minutes * 60 * 1000)
+          );
+        }
+        
+        const events = await this.metrics.getCycleEventsFromDB(
+          cycleId,
+          eventType,
+          startTime,
+          endTime,
+          limit
+        );
+        
+        res.json({
+          cycleId,
+          events,
+          count: events.length,
+          eventType: eventType || 'all',
+          startTime,
+          endTime,
+        });
+      } catch (err: any) {
+        console.error('Error loading cycle events:', err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
     // Historical data endpoint
     this.app.get('/api/history', async (req: Request, res: Response) => {
       const cycleId = req.query.cycleId as string;
@@ -286,8 +361,12 @@ export class DashboardServer {
         </div>
       </div>
 
-      <h2 style="margin-bottom: 15px; color: #4CAF50;">Cycle Metrics</h2>
+      <h2 style="margin-bottom: 15px; color: #4CAF50;">Cycle Metrics (Memory)</h2>
       <div id="cycles">Loading...</div>
+
+      <h2 style="margin-bottom: 15px; color: #4CAF50; margin-top: 30px;">Cycle Statistics (Persisted)</h2>
+      <p style="color: #888; font-size: 12px; margin-bottom: 10px;">Statistics from database - persists across restarts</p>
+      <div id="statistics">Loading...</div>
 
       <h2 style="margin-bottom: 15px; color: #4CAF50; margin-top: 30px;">Arbitrage BPS History</h2>
       <div class="chart-controls" style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
@@ -737,10 +816,167 @@ export class DashboardServer {
           });
       }
 
+      // Statistics functions
+      function formatTimestamp(timestamp) {
+        if (!timestamp) return '-';
+        const date = new Date(timestamp);
+        return date.toLocaleString();
+      }
+
+      function buildStatisticsTableHTML(statistics) {
+        if (!statistics || statistics.length === 0) {
+          return '<p style="color: #888;">No statistics available yet. Statistics will appear after opportunities or executions occur.</p>';
+        }
+
+        let html = '<table><thead><tr>';
+        html += '<th>Cycle ID</th>';
+        html += '<th>Total Opportunities</th>';
+        html += '<th>Total Executions</th>';
+        html += '<th>First Opportunity</th>';
+        html += '<th>Last Opportunity</th>';
+        html += '<th>First Execution</th>';
+        html += '<th>Last Execution</th>';
+        html += '<th>Actions</th>';
+        html += '</tr></thead><tbody>';
+
+        statistics.forEach(function(stat) {
+          html += '<tr data-cycle-id="' + escapeHtml(stat.cycleId) + '">';
+          html += '<td><code>' + escapeHtml(stat.cycleId) + '</code></td>';
+          html += '<td><span class="badge badge-info">' + stat.totalOpportunities + '</span></td>';
+          html += '<td><span class="badge badge-success">' + stat.totalExecutions + '</span></td>';
+          html += '<td>' + formatTimestamp(stat.firstOpportunityTimestamp) + '</td>';
+          html += '<td>' + formatTimestamp(stat.lastOpportunityTimestamp) + '</td>';
+          html += '<td>' + formatTimestamp(stat.firstExecutionTimestamp) + '</td>';
+          html += '<td>' + formatTimestamp(stat.lastExecutionTimestamp) + '</td>';
+          html += '<td>';
+          html += '<button class="view-events-btn" data-cycle-id="' + escapeHtml(stat.cycleId) + '" style="padding: 4px 8px; background: #667eea; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 11px; margin-right: 5px;">View Events</button>';
+          html += '</td>';
+          html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        return html;
+      }
+
+      function setupStatisticsEventListeners() {
+        // Remove old listeners by cloning
+        const container = document.getElementById('statistics');
+        if (!container) return;
+        
+        const buttons = container.querySelectorAll('.view-events-btn');
+        buttons.forEach(function(btn) {
+          // Remove old listener if exists
+          const newBtn = btn.cloneNode(true);
+          btn.parentNode.replaceChild(newBtn, btn);
+          
+          // Add new listener
+          newBtn.addEventListener('click', function() {
+            const cycleId = this.getAttribute('data-cycle-id');
+            if (cycleId) {
+              viewCycleEvents(cycleId);
+            }
+          });
+        });
+      }
+
+      function updateStatistics() {
+        fetch('/api/statistics')
+          .then(r => r.json())
+          .then(data => {
+            const container = document.getElementById('statistics');
+            if (data.cycles && data.cycles.length > 0) {
+              container.innerHTML = buildStatisticsTableHTML(data.cycles);
+              // Setup event listeners after HTML is inserted
+              setupStatisticsEventListeners();
+            } else {
+              container.innerHTML = '<p style="color: #888;">No statistics available yet. Statistics will appear after opportunities or executions occur.</p>';
+            }
+          })
+          .catch(err => {
+            console.error('Error loading statistics:', err);
+            const container = document.getElementById('statistics');
+            container.innerHTML = '<p style="color: red;">Error loading statistics: ' + err + '</p>';
+          });
+      }
+
+      function viewCycleEvents(cycleId) {
+        // Create modal or show events in a new section
+        const modal = document.createElement('div');
+        modal.id = 'eventsModal';
+        modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: center; justify-content: center;';
+        
+        const modalContent = document.createElement('div');
+        modalContent.style.cssText = 'background: #2a2a2a; padding: 20px; border-radius: 8px; max-width: 90%; max-height: 90%; overflow: auto; position: relative;';
+        
+        const closeBtn = document.createElement('button');
+        closeBtn.textContent = 'Close';
+        closeBtn.style.cssText = 'position: absolute; top: 10px; right: 10px; background: #ff4444; color: white; border: none; border-radius: 4px; padding: 5px 10px; cursor: pointer;';
+        closeBtn.addEventListener('click', function() {
+          modal.remove();
+        });
+        
+        const title = document.createElement('h3');
+        title.style.cssText = 'color: #4CAF50; margin-bottom: 15px;';
+        title.textContent = 'Events for ' + escapeHtml(cycleId);
+        
+        const content = document.createElement('div');
+        content.id = 'eventsContent';
+        content.textContent = 'Loading...';
+        
+        modalContent.appendChild(closeBtn);
+        modalContent.appendChild(title);
+        modalContent.appendChild(content);
+        modal.appendChild(modalContent);
+        document.body.appendChild(modal);
+
+        // Load events
+        fetch('/api/cycles/' + encodeURIComponent(cycleId) + '/events?limit=100')
+          .then(r => r.json())
+          .then(data => {
+            if (data.events && data.events.length > 0) {
+              let html = '<table style="width: 100%;"><thead><tr>';
+              html += '<th>Type</th>';
+              html += '<th>Timestamp</th>';
+              html += '<th>Arbitrage BPS</th>';
+              html += '<th>Profit</th>';
+              html += '<th>Amount In</th>';
+              html += '<th>TX Hash</th>';
+              html += '</tr></thead><tbody>';
+              
+              data.events.forEach(function(event) {
+                html += '<tr>';
+                html += '<td><span class="badge ' + (event.eventType === 'opportunity' ? 'badge-info' : 'badge-success') + '">' + escapeHtml(event.eventType) + '</span></td>';
+                html += '<td>' + formatTimestamp(event.timestamp) + '</td>';
+                html += '<td>' + (event.arbitrageBps !== null ? event.arbitrageBps.toFixed(2) : '-') + '</td>';
+                html += '<td>' + (event.profit ? formatBigInt(event.profit) : '-') + '</td>';
+                html += '<td>' + (event.amountIn ? formatBigInt(event.amountIn) : '-') + '</td>';
+                if (event.txHash) {
+                  const txHashEscaped = escapeHtml(event.txHash);
+                  html += '<td><a href="https://bscscan.com/tx/' + txHashEscaped + '" target="_blank" style="color: #60a5fa;">' + escapeHtml(event.txHash.substring(0, 10)) + '...</a></td>';
+                } else {
+                  html += '<td>-</td>';
+                }
+                html += '</tr>';
+              });
+              
+              html += '</tbody></table>';
+              content.innerHTML = html;
+            } else {
+              content.innerHTML = '<p style="color: #888;">No events found for this cycle.</p>';
+            }
+          })
+          .catch(err => {
+            content.innerHTML = '<p style="color: red;">Error loading events: ' + escapeHtml(String(err)) + '</p>';
+          });
+      }
+
       // Initial load
       updateDashboard();
+      updateStatistics();
       // Auto-refresh every 1 second (smooth updates, no page reload)
       setInterval(updateDashboard, 1000);
+      // Refresh statistics every 5 seconds (less frequent since it's persisted data)
+      setInterval(updateStatistics, 5000);
 
       // Chart functionality
       let arbChart = null;

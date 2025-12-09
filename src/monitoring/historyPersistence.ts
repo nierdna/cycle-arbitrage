@@ -60,6 +60,43 @@ export class HistoryPersistence {
       CREATE INDEX IF NOT EXISTS idx_cycle_timestamp ON history_points(cycle_id, timestamp);
     `);
 
+    // Create cycle_statistics table for aggregated statistics
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS cycle_statistics (
+        cycle_id TEXT PRIMARY KEY,
+        total_opportunities INTEGER NOT NULL DEFAULT 0,
+        total_executions INTEGER NOT NULL DEFAULT 0,
+        first_opportunity_timestamp INTEGER,
+        last_opportunity_timestamp INTEGER,
+        first_execution_timestamp INTEGER,
+        last_execution_timestamp INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cycle_statistics_updated ON cycle_statistics(updated_at);
+    `);
+
+    // Create cycle_events table for individual events
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS cycle_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cycle_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        arbitrage_bps REAL,
+        profit TEXT,
+        tx_hash TEXT,
+        amount_in TEXT,
+        CHECK(event_type IN ('opportunity', 'execution'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_cycle_events_cycle_id ON cycle_events(cycle_id);
+      CREATE INDEX IF NOT EXISTS idx_cycle_events_timestamp ON cycle_events(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_cycle_events_type ON cycle_events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_cycle_events_cycle_timestamp ON cycle_events(cycle_id, timestamp);
+    `);
+
     // Add new columns if they don't exist (for existing databases)
     try {
       this.db.exec(`
@@ -254,6 +291,276 @@ export class HistoryPersistence {
     } catch (err: any) {
       console.warn(`Warning: Could not cleanup old history data:`, err.message);
       return 0;
+    }
+  }
+
+  /**
+   * Update cycle statistics when opportunity or execution occurs
+   */
+  async updateCycleStatistics(
+    cycleId: string,
+    eventType: 'opportunity' | 'execution',
+    timestamp: number
+  ): Promise<void> {
+    const now = Date.now();
+    
+    // Check if cycle exists
+    const checkStmt = this.db.prepare(`
+      SELECT cycle_id FROM cycle_statistics WHERE cycle_id = ?
+    `);
+    const existing = checkStmt.get(cycleId);
+    
+    if (!existing) {
+      // Create new record
+      const insertStmt = this.db.prepare(`
+        INSERT INTO cycle_statistics 
+        (cycle_id, total_opportunities, total_executions, 
+         first_opportunity_timestamp, last_opportunity_timestamp,
+         first_execution_timestamp, last_execution_timestamp,
+         created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      
+      if (eventType === 'opportunity') {
+        insertStmt.run(
+          cycleId,
+          1, // total_opportunities
+          0, // total_executions
+          timestamp, // first_opportunity_timestamp
+          timestamp, // last_opportunity_timestamp
+          null, // first_execution_timestamp
+          null, // last_execution_timestamp
+          now, // created_at
+          now  // updated_at
+        );
+      } else {
+        insertStmt.run(
+          cycleId,
+          0, // total_opportunities
+          1, // total_executions
+          null, // first_opportunity_timestamp
+          null, // last_opportunity_timestamp
+          timestamp, // first_execution_timestamp
+          timestamp, // last_execution_timestamp
+          now, // created_at
+          now  // updated_at
+        );
+      }
+    } else {
+      // Update existing record
+      const updateStmt = this.db.prepare(`
+        UPDATE cycle_statistics
+        SET 
+          total_opportunities = total_opportunities + ?,
+          total_executions = total_executions + ?,
+          first_opportunity_timestamp = CASE 
+            WHEN ? = 1 AND (first_opportunity_timestamp IS NULL OR first_opportunity_timestamp > ?) 
+            THEN ? ELSE first_opportunity_timestamp END,
+          last_opportunity_timestamp = CASE 
+            WHEN ? = 1 AND (last_opportunity_timestamp IS NULL OR last_opportunity_timestamp < ?) 
+            THEN ? ELSE last_opportunity_timestamp END,
+          first_execution_timestamp = CASE 
+            WHEN ? = 1 AND (first_execution_timestamp IS NULL OR first_execution_timestamp > ?) 
+            THEN ? ELSE first_execution_timestamp END,
+          last_execution_timestamp = CASE 
+            WHEN ? = 1 AND (last_execution_timestamp IS NULL OR last_execution_timestamp < ?) 
+            THEN ? ELSE last_execution_timestamp END,
+          updated_at = ?
+        WHERE cycle_id = ?
+      `);
+      
+      const isOpportunity = eventType === 'opportunity' ? 1 : 0;
+      const isExecution = eventType === 'execution' ? 1 : 0;
+      
+      updateStmt.run(
+        isOpportunity, // increment total_opportunities
+        isExecution, // increment total_executions
+        isOpportunity, timestamp, timestamp, // first_opportunity_timestamp
+        isOpportunity, timestamp, timestamp, // last_opportunity_timestamp
+        isExecution, timestamp, timestamp, // first_execution_timestamp
+        isExecution, timestamp, timestamp, // last_execution_timestamp
+        now, // updated_at
+        cycleId
+      );
+    }
+  }
+
+  /**
+   * Get cycle statistics from database
+   */
+  async getCycleStatistics(cycleId: string): Promise<{
+    cycleId: string;
+    totalOpportunities: number;
+    totalExecutions: number;
+    firstOpportunityTimestamp: number | null;
+    lastOpportunityTimestamp: number | null;
+    firstExecutionTimestamp: number | null;
+    lastExecutionTimestamp: number | null;
+    createdAt: number;
+    updatedAt: number;
+  } | null> {
+    const stmt = this.db.prepare(`
+      SELECT * FROM cycle_statistics WHERE cycle_id = ?
+    `);
+    
+    try {
+      const row = stmt.get(cycleId) as any;
+      if (!row) return null;
+      
+      return {
+        cycleId: row.cycle_id,
+        totalOpportunities: row.total_opportunities,
+        totalExecutions: row.total_executions,
+        firstOpportunityTimestamp: row.first_opportunity_timestamp,
+        lastOpportunityTimestamp: row.last_opportunity_timestamp,
+        firstExecutionTimestamp: row.first_execution_timestamp,
+        lastExecutionTimestamp: row.last_execution_timestamp,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    } catch (err: any) {
+      console.warn(`Warning: Could not load cycle statistics:`, err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Get all cycle statistics
+   */
+  async getAllCycleStatistics(): Promise<Array<{
+    cycleId: string;
+    totalOpportunities: number;
+    totalExecutions: number;
+    firstOpportunityTimestamp: number | null;
+    lastOpportunityTimestamp: number | null;
+    firstExecutionTimestamp: number | null;
+    lastExecutionTimestamp: number | null;
+    createdAt: number;
+    updatedAt: number;
+  }>> {
+    const stmt = this.db.prepare(`
+      SELECT * FROM cycle_statistics ORDER BY updated_at DESC
+    `);
+    
+    try {
+      const rows = stmt.all() as any[];
+      return rows.map(row => ({
+        cycleId: row.cycle_id,
+        totalOpportunities: row.total_opportunities,
+        totalExecutions: row.total_executions,
+        firstOpportunityTimestamp: row.first_opportunity_timestamp,
+        lastOpportunityTimestamp: row.last_opportunity_timestamp,
+        firstExecutionTimestamp: row.first_execution_timestamp,
+        lastExecutionTimestamp: row.last_execution_timestamp,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+    } catch (err: any) {
+      console.warn(`Warning: Could not load all cycle statistics:`, err.message);
+      return [];
+    }
+  }
+
+  /**
+   * Save cycle event (opportunity or execution)
+   */
+  async saveCycleEvent(
+    cycleId: string,
+    eventType: 'opportunity' | 'execution',
+    timestamp: number,
+    data: {
+      arbitrageBps?: number;
+      profit?: bigint | string;
+      txHash?: string;
+      amountIn?: bigint | string;
+    }
+  ): Promise<void> {
+    const stmt = this.db.prepare(`
+      INSERT INTO cycle_events 
+      (cycle_id, event_type, timestamp, arbitrage_bps, profit, tx_hash, amount_in)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    
+    try {
+      stmt.run(
+        cycleId,
+        eventType,
+        timestamp,
+        data.arbitrageBps ?? null,
+        data.profit !== undefined ? String(data.profit) : null,
+        data.txHash ?? null,
+        data.amountIn !== undefined ? String(data.amountIn) : null
+      );
+    } catch (err: any) {
+      console.error(`Error saving cycle event:`, err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * Get cycle events within time range
+   */
+  async getCycleEvents(
+    cycleId: string,
+    eventType?: 'opportunity' | 'execution',
+    startTime?: number,
+    endTime?: number,
+    limit?: number
+  ): Promise<Array<{
+    id: number;
+    cycleId: string;
+    eventType: string;
+    timestamp: number;
+    arbitrageBps: number | null;
+    profit: string | null;
+    txHash: string | null;
+    amountIn: string | null;
+  }>> {
+    let query = `
+      SELECT * FROM cycle_events
+      WHERE cycle_id = ?
+    `;
+    const params: any[] = [cycleId];
+    
+    if (eventType) {
+      query += ` AND event_type = ?`;
+      params.push(eventType);
+    }
+    
+    if (startTime !== undefined) {
+      query += ` AND timestamp >= ?`;
+      params.push(startTime);
+    }
+    
+    if (endTime !== undefined) {
+      query += ` AND timestamp <= ?`;
+      params.push(endTime);
+    }
+    
+    query += ` ORDER BY timestamp DESC`;
+    
+    if (limit !== undefined) {
+      query += ` LIMIT ?`;
+      params.push(limit);
+    }
+    
+    const stmt = this.db.prepare(query);
+    
+    try {
+      const rows = stmt.all(...params) as any[];
+      return rows.map(row => ({
+        id: row.id,
+        cycleId: row.cycle_id,
+        eventType: row.event_type,
+        timestamp: row.timestamp,
+        arbitrageBps: row.arbitrage_bps,
+        profit: row.profit,
+        txHash: row.tx_hash,
+        amountIn: row.amount_in,
+      }));
+    } catch (err: any) {
+      console.warn(`Warning: Could not load cycle events:`, err.message);
+      return [];
     }
   }
 
