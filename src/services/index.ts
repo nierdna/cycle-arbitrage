@@ -9,6 +9,7 @@ export * from './tradeExecutor.js';
 export * from './gasPriceService.js';
 export * from './tokenPriceService.js';
 export * from './minProfitCalculator.js';
+export * from './cyclePersistence.js';
 
 // Re-export types for convenience
 export type { BundleConfig, ArbitrageContractConfig } from './tradeExecutor.js';
