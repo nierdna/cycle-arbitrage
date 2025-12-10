@@ -61,6 +61,11 @@ async function main() {
     console.warn('Failed to load arbitrage config from file, using defaults:', error);
   }
 
+  // Determine mode from environment variable or config file
+  // Modes: 'discovery' (discover and save cycles), 'scan' (load cycles and scan), 'auto' (auto-detect)
+  const mode = process.env.ARBITRAGE_MODE || arbitrageConfigFromFile?.mode || 'auto';
+  console.log(`Mode: ${mode}\n`);
+
   // Create arbitrage instance with auto-discovery mode
   // Config from file takes precedence over hardcoded defaults
   const arbitrageOptions = {
@@ -89,6 +94,12 @@ async function main() {
         enabled: true,
       }
       : undefined,
+    // Cycle persistence options
+    cyclesFilePath: process.env.CYCLES_FILE_PATH || arbitrageConfigFromFile?.cyclesFilePath,
+    mode: mode as 'discovery' | 'scan' | 'auto',
+    validateCyclesOnLoad: arbitrageConfigFromFile?.validateCyclesOnLoad ?? true,
+    // Cycles whitelist (from config file)
+    cyclesWhitelist: arbitrageConfigFromFile?.cyclesWhitelist,
   };
 
   const arbitrage = new CycleArbitrage(provider, tokenRegistry, arbitrageOptions);
@@ -170,8 +181,17 @@ async function main() {
     console.log('ℹ Execution mode disabled - only scanning (set PRIVATE_KEY to enable)\n');
   }
 
-  // Initialize and start scanning
+  // Initialize (discovery mode will exit here)
   await arbitrage.initialize();
+
+  // If mode is discovery, exit after saving cycles
+  if (mode === 'discovery') {
+    console.log('✓ Discovery complete. Cycles saved to file.');
+    console.log('Run with ARBITRAGE_MODE=scan to start scanning.');
+    process.exit(0);
+  }
+
+  // Start scanning (scan mode or auto mode)
   await arbitrage.scan(); // Runs forever
 }
 

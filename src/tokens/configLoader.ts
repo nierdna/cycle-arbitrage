@@ -30,11 +30,20 @@ export interface ArbitrageConfig {
   gasPriceUpdateInterval?: number;
   tokenPriceUpdateInterval?: number;
   walletKeys?: string[]; // List of paths to private key files (e.g., [".keys/0x1234...txt", ".keys/0x5678...txt"])
+  mode?: 'discovery' | 'scan' | 'auto'; // Mode: discovery (save cycles), scan (load cycles), auto (auto-detect)
+  cyclesFilePath?: string; // Path to cycles JSON file (default: 'data/cycles.json')
+  validateCyclesOnLoad?: boolean; // Validate cycles when loading from file (default: true)
+  cyclesWhitelist?: string[]; // List of cycleIds to whitelist (only scan these cycles)
+}
+
+export interface CycleWhitelistConfig {
+  cycleId: string;
 }
 
 export interface TokensConfigFile {
   tokens: TokenConfig[];
   arbitrage?: ArbitrageConfig;
+  cycles?: CycleWhitelistConfig[]; // Whitelist cycles from config file
 }
 
 /**
@@ -160,10 +169,37 @@ export function loadArbitrageConfig(configPath?: string): ArbitrageConfig | unde
   }
 
   if (!config.arbitrage) {
+    // Even if no arbitrage config, check for cycles whitelist
+    if (config.cycles && Array.isArray(config.cycles)) {
+      const cyclesWhitelist = config.cycles
+        .map((c) => c.cycleId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      
+      if (cyclesWhitelist.length > 0) {
+        return { cyclesWhitelist };
+      }
+    }
     return undefined;
   }
 
   const arbitrageConfig: ArbitrageConfig = { ...config.arbitrage };
+
+  // Load cycles whitelist from config.cycles if available
+  if (config.cycles && Array.isArray(config.cycles)) {
+    const cyclesWhitelist = config.cycles
+      .map((c) => c.cycleId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    
+    if (cyclesWhitelist.length > 0) {
+      // Merge with existing cyclesWhitelist if any
+      arbitrageConfig.cyclesWhitelist = [
+        ...(arbitrageConfig.cyclesWhitelist || []),
+        ...cyclesWhitelist,
+      ];
+      // Remove duplicates
+      arbitrageConfig.cyclesWhitelist = Array.from(new Set(arbitrageConfig.cyclesWhitelist));
+    }
+  }
 
   // Convert string BigInt values to actual BigInt if needed (for validation)
   // Note: We keep them as strings in the config, but validate format

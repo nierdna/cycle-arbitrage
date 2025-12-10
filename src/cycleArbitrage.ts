@@ -29,6 +29,8 @@ import {
 import { WalletPool } from './wallet/walletPool.js';
 import { CycleEstimator } from './estimation/cycleEstimator.js';
 import { TelegramNotifier, TelegramConfig } from './notifications/index.js';
+import { CyclePersistenceService } from './services/cyclePersistence.js';
+import { CycleWithAmounts } from './services/cycleDiscovery.js';
 
 export interface TokenAmountConfig {
   minAmountIn: bigint;
@@ -66,6 +68,11 @@ export interface ArbitrageOptions {
   telegramConfig?: TelegramConfig; // Telegram notification configuration (optional)
   gasPriceUpdateInterval?: number; // Gas price update interval in ms (default: 5000)
   tokenPriceUpdateInterval?: number; // Token price update interval in ms (default: 30000)
+  // New options for cycle persistence
+  cyclesFilePath?: string; // Path to cycles JSON file (default: 'data/cycles.json')
+  mode?: 'discovery' | 'scan' | 'auto'; // Mode: discovery (save cycles), scan (load cycles), auto (discover if file doesn't exist)
+  validateCyclesOnLoad?: boolean; // Validate cycles when loading from file (default: true)
+  cyclesWhitelist?: string[]; // List of cycleIds to whitelist (only scan these cycles)
 }
 
 /**
@@ -97,10 +104,13 @@ export class CycleArbitrage {
   private tokenPriceService?: TokenPriceService;
   private minProfitCalculator?: MinProfitCalculator;
 
+  // Cycle persistence
+  private cyclePersistence: CyclePersistenceService;
+
   private cycles: Map<string, CycleWithState> = new Map();
   private scanners: Map<string, CycleScanner> = new Map(); // Track active scanners for cleanup
   private isRunning: boolean = false; // Track if scanning is active
-  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees' | 'telegramConfig'>> & {
+  private options: Required<Omit<ArbitrageOptions, 'wssUrl' | 'optimizeAmountIn' | 'optimizationInterval' | 'optimizationPrecision' | 'logDir' | 'dashboardPort' | 'historyDir' | 'maxHops' | 'discoveryFees' | 'telegramConfig' | 'cyclesFilePath' | 'mode' | 'validateCyclesOnLoad' | 'cyclesWhitelist'>> & {
     wssUrl?: string;
     optimizeAmountIn: boolean;
     optimizationInterval: number;
@@ -111,6 +121,10 @@ export class CycleArbitrage {
     maxHops: number;
     discoveryFees: number[];
     telegramConfig?: TelegramConfig;
+    cyclesFilePath: string;
+    mode: 'discovery' | 'scan' | 'auto';
+    validateCyclesOnLoad: boolean;
+    cyclesWhitelist?: string[];
   };
 
   constructor(
@@ -133,10 +147,20 @@ export class CycleArbitrage {
       discoveryFees: options.discoveryFees ?? [100, 500, 2500, 10000],
       gasPriceUpdateInterval: options.gasPriceUpdateInterval ?? 5000, // 5 seconds
       tokenPriceUpdateInterval: options.tokenPriceUpdateInterval ?? 30000, // 30 seconds
+      cyclesFilePath: options.cyclesFilePath ?? 'data/cycles.json',
+      mode: options.mode ?? 'auto',
+      validateCyclesOnLoad: options.validateCyclesOnLoad ?? true,
+      cyclesWhitelist: options.cyclesWhitelist,
     };
 
-    // Initialize logger
+    // Initialize logger first (needed by cyclePersistence)
     this.logger = createLogger(this.options.logDir);
+
+    // Initialize cycle persistence service
+    this.cyclePersistence = new CyclePersistenceService(
+      this.options.cyclesFilePath,
+      this.logger
+    );
 
     // Initialize metrics collector with history persistence
     this.metrics = new MetricsCollector(this.options.historyDir);
@@ -218,30 +242,171 @@ export class CycleArbitrage {
   }
 
   /**
+   * Filter cycles based on whitelist if configured
+   */
+  private filterCyclesByWhitelist(cycles: CycleWithAmounts[]): CycleWithAmounts[] {
+    if (!this.options.cyclesWhitelist || this.options.cyclesWhitelist.length === 0) {
+      return cycles; // No whitelist, return all cycles
+    }
+
+    const whitelistSet = new Set(this.options.cyclesWhitelist.map(id => id.toLowerCase()));
+    const filtered = cycles.filter(cycle => whitelistSet.has(cycle.cycleId.toLowerCase()));
+
+    if (filtered.length < cycles.length) {
+      const filteredCount = cycles.length - filtered.length;
+      this.logger.info(
+        `Whitelist filter: ${filtered.length} cycles allowed, ${filteredCount} cycles filtered out`
+      );
+    }
+
+    // Log warning if some whitelist cycleIds are not found
+    const foundCycleIds = new Set(filtered.map(c => c.cycleId.toLowerCase()));
+    const missingCycleIds = this.options.cyclesWhitelist.filter(
+      id => !foundCycleIds.has(id.toLowerCase())
+    );
+    if (missingCycleIds.length > 0) {
+      this.logger.warn(
+        `Whitelist cycles not found: ${missingCycleIds.join(', ')}`
+      );
+    }
+
+    return filtered;
+  }
+
+  /**
    * Discover cycles automatically from token list
    * Builds pool matrix and finds all valid cycles
    */
-  async discoverCycles(): Promise<CycleConfig[]> {
+  async discoverCycles(): Promise<CycleWithAmounts[]> {
     const cyclesWithAmounts = await this.cycleDiscovery.discoverCycles(
       this.options.maxHops,
       this.options.discoveryFees
     );
 
+    // Apply whitelist filter if configured
+    const filteredCycles = this.filterCyclesByWhitelist(cyclesWithAmounts);
+
     // Log cycles with readable format
-    for (let i = 0; i < cyclesWithAmounts.length; i++) {
-      const cycle = cyclesWithAmounts[i];
+    for (let i = 0; i < filteredCycles.length; i++) {
+      const cycle = filteredCycles[i];
       this.logger.info(this.formatter.formatCycleForLog(cycle, i));
     }
 
     // Register cycles for monitoring
-    for (const cycle of cyclesWithAmounts) {
+    for (const cycle of filteredCycles) {
       this.cycles.set(cycle.cycleId, {
         ...cycle,
         poolAddresses: [],
       });
     }
 
-    return cyclesWithAmounts;
+    return filteredCycles;
+  }
+
+  /**
+   * Discover cycles and save to JSON file (Discovery Mode)
+   */
+  async discoverAndSaveCycles(): Promise<void> {
+    this.logger.info('=== Discovery Mode: Discovering cycles ===');
+
+    // Initialize token registry and pool matrix builder
+    await this.tokenRegistry.initialize();
+    await this.poolMatrixBuilder.initialize();
+
+    // Discover cycles
+    const cyclesWithAmounts = await this.discoverCycles();
+
+    // Calculate token list hash for validation
+    const tokenAddresses = this.tokenRegistry.getAllAddresses();
+    const tokenListHash = CyclePersistenceService.calculateTokenListHash(tokenAddresses);
+
+    // Save cycles to file
+    this.cyclePersistence.saveCycles(cyclesWithAmounts, {
+      tokenListHash,
+      tokenCount: tokenAddresses.length,
+      maxHops: this.options.maxHops,
+      discoveryFees: this.options.discoveryFees,
+    });
+
+    this.logger.info(
+      `✓ Discovery complete: ${cyclesWithAmounts.length} cycles saved to ${this.options.cyclesFilePath}`
+    );
+  }
+
+  /**
+   * Load cycles from JSON file (Scan Mode)
+   * Validates cycles and filters invalid ones
+   */
+  async loadCyclesFromFile(): Promise<void> {
+    this.logger.info('=== Scan Mode: Loading cycles from file ===');
+
+    if (!this.cyclePersistence.cyclesFileExists()) {
+      throw new Error(
+        `Cycles file not found: ${this.options.cyclesFilePath}. ` +
+        `Please run discovery mode first or set mode='auto' to auto-discover.`
+      );
+    }
+
+    // Load cycles from file
+    const { cycles, metadata } = this.cyclePersistence.loadCycles();
+
+    this.logger.info(
+      `Loaded ${cycles.length} cycles from file ` +
+      `(discovered: ${new Date(metadata.discoveryTimestamp).toISOString()}, ` +
+      `tokens: ${metadata.tokenCount}, maxHops: ${metadata.maxHops})`
+    );
+
+    // Apply whitelist filter if configured
+    const filteredCycles = this.filterCyclesByWhitelist(cycles);
+
+    // Validate token list hash if validateCyclesOnLoad is enabled
+    if (this.options.validateCyclesOnLoad) {
+      const currentTokenAddresses = this.tokenRegistry.getAllAddresses();
+      const currentTokenListHash = CyclePersistenceService.calculateTokenListHash(currentTokenAddresses);
+
+      if (currentTokenListHash !== metadata.tokenListHash) {
+        this.logger.warn(
+          `⚠ Token list hash mismatch! ` +
+          `File hash: ${metadata.tokenListHash}, Current hash: ${currentTokenListHash}. ` +
+          `Cycles may be outdated. Consider re-running discovery.`
+        );
+      }
+    }
+
+    // Validate and register cycles
+    let validCycles = 0;
+    let invalidCycles = 0;
+
+    for (const cycle of filteredCycles) {
+      // Basic validation: check if start token still has amountConfig
+      const startTokenAddress = cycle.addresses[0].toLowerCase();
+      const token = this.tokenRegistry.getToken(startTokenAddress);
+
+      if (!token?.amountConfig) {
+        this.logger.warn(
+          `Skipping cycle ${cycle.cycleId}: start token ${startTokenAddress} no longer has amountConfig`
+        );
+        invalidCycles++;
+        continue;
+      }
+
+      // Register cycle
+      this.cycles.set(cycle.cycleId, {
+        ...cycle,
+        poolAddresses: [], // Will be resolved later
+      });
+      validCycles++;
+    }
+
+    this.logger.info(
+      `✓ Loaded ${validCycles} valid cycles, ${invalidCycles} invalid cycles filtered`
+    );
+
+    if (validCycles === 0) {
+      throw new Error(
+        'No valid cycles found after loading from file. Please re-run discovery.'
+      );
+    }
   }
 
 
@@ -303,7 +468,7 @@ export class CycleArbitrage {
   }
 
   /**
-   * Initialize: Discover cycles, fetch pool addresses and subscribe to WebSocket
+   * Initialize: Load or discover cycles, fetch pool addresses and subscribe to WebSocket
    */
   async initialize(): Promise<void> {
     this.logger.info('=== Cycle Arbitrage ===');
@@ -314,9 +479,36 @@ export class CycleArbitrage {
     // Initialize pool matrix builder cache (load pool existence cache from file)
     await this.poolMatrixBuilder.initialize();
 
-    // Discover cycles if not already discovered
+    // Handle cycles based on mode
+    if (this.options.mode === 'discovery') {
+      // Discovery mode: discover and save cycles, then exit
+      await this.discoverAndSaveCycles();
+      return; // Exit after saving
+    } else if (this.options.mode === 'scan') {
+      // Scan mode: load cycles from file
+      await this.loadCyclesFromFile();
+    } else {
+      // Auto mode: try to load from file, fallback to discovery
+      if (this.cyclePersistence.cyclesFileExists()) {
+        this.logger.info('Cycles file found, loading from file...');
+        try {
+          await this.loadCyclesFromFile();
+        } catch (error: any) {
+          this.logger.warn(
+            `Failed to load cycles from file: ${error.message}. Falling back to discovery...`
+          );
+          await this.discoverCycles();
+        }
+      } else {
+        this.logger.info('Cycles file not found, discovering cycles...');
+        await this.discoverCycles();
+      }
+    }
+
+    // If in discovery mode, we already returned above
+    // Continue with scan mode initialization
     if (this.cycles.size === 0) {
-      await this.discoverCycles();
+      throw new Error('No cycles available for scanning');
     }
 
     this.logger.info(`Total cycles: ${this.cycles.size}`);
